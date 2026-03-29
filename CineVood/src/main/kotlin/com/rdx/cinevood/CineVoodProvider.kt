@@ -2,12 +2,15 @@ package com.rdx.cinevood
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import org.json.JSONArray
+import org.json.JSONObject
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class CineVoodProvider : MainAPI() {
 
-    override var mainUrl        = "https://1cinevood.watch"
+    override var mainUrl        = "https://one.1cinevood.watch"
     override var name           = "CineVood"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
     override var lang           = "hi"
@@ -22,122 +25,404 @@ class CineVoodProvider : MainAPI() {
 
         private val DEFAULT_HEADERS = mapOf(
             "User-Agent"      to USER_AGENT,
-            "Accept"          to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language" to "en-US,en;q=0.5",
-            "Connection"      to "keep-alive"
+            "Accept"          to "*/*",
+            "Accept-Language" to "en-US,en;q=0.5"
         )
+
+        private val catCache = mutableMapOf<String, Int>()
     }
 
-    private suspend fun cfGet(url: String): com.lagradost.cloudstream3.app.AppResponse {
-        val resp = app.get(url, timeout = 120, headers = DEFAULT_HEADERS)
-        val html = resp.text
-        return if (html.contains("Just a moment") || html.contains("challenge-platform")) {
-            app.get(
-                url, timeout = 180, headers = DEFAULT_HEADERS + mapOf(
-                    "Cache-Control" to "no-cache",
-                    "Pragma"        to "no-cache"
-                )
-            )
-        } else resp
-    }
+    private val apiUrl get() = "$mainUrl/wp-json/wp/v2"
 
     override val mainPage = mainPageOf(
-        "$mainUrl/"                           to "Latest",
-        "$mainUrl/bollywood/"                 to "Bollywood",
-        "$mainUrl/hollywood/"                 to "Hollywood",
-        "$mainUrl/tamil/"                     to "Tamil",
-        "$mainUrl/telugu/"                    to "Telugu",
-        "$mainUrl/malayalam/"                 to "Malayalam",
-        "$mainUrl/kannada/"                   to "Kannada",
-        "$mainUrl/hindi-dubbed/south-dubbed/" to "South Dubbed",
-        "$mainUrl/web-series/"                to "Web Series",
-        "$mainUrl/tv-shows/"                  to "TV Shows"
+        ""                        to "Latest",
+        "bollywood"               to "Bollywood",
+        "hollywood"               to "Hollywood",
+        "tamil"                   to "Tamil",
+        "telugu"                  to "Telugu",
+        "malayalam"               to "Malayalam",
+        "kannada"                 to "Kannada",
+        "south-dubbed"            to "South Dubbed",
+        "web-series"              to "Web Series",
+        "tv-shows"                to "TV Shows"
     )
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page == 1) request.data
-                  else "${request.data}page/$page/"
+    // ══════════════════════════════════════════════════════════════
+    //  HOME PAGE
+    // ══════════════════════════════════════════════════════════════
+    override suspend fun getMainPage(
+        page: Int,
+        request: MainPageRequest
+    ): HomePageResponse {
+        val slug = request.data
 
-        val doc = cfGet(url).document
+        var url = "$apiUrl/posts?per_page=20&page=$page&_embed"
 
-        var items = doc.select("article.latestPost").mapNotNull { articleToResult(it) }
-        if (items.isEmpty()) {
-            items = doc.select("article").mapNotNull { articleToResult(it) }
+        if (slug.isNotBlank()) {
+            val catId = getCategoryId(slug)
+            if (catId != null) {
+                url += "&categories=$catId"
+            }
         }
+
+        val items = fetchPosts(url)
+
+        // DEBUG - remove after it works
+        if (items.isEmpty()) {
+            try {
+                val resp = app.get(url, headers = DEFAULT_HEADERS)
+                val text = resp.text
+                val isCF = text.contains("Just a moment")
+                val isJson = text.trimStart().startsWith("[") || text.trimStart().startsWith("{")
+                val debugMsg = "API: cf=$isCF | json=$isJson | len=${text.length} | start=${text.take(50)}"
+
+                return newHomePageResponse(
+                    request.name,
+                    listOf(
+                        newMovieSearchResponse(debugMsg, mainUrl, TvType.Movie) {
+                            this.posterUrl = null
+                        }
+                    )
+                )
+            } catch (e: Exception) {
+                return newHomePageResponse(
+                    request.name,
+                    listOf(
+                        newMovieSearchResponse(
+                            "ERROR: ${e.message?.take(100)}",
+                            mainUrl,
+                            TvType.Movie
+                        ) { this.posterUrl = null }
+                    )
+                )
+            }
+        }
+        // END DEBUG
 
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
 
+    // ══════════════════════════════════════════════════════════════
+    //  SEARCH
+    // ══════════════════════════════════════════════════════════════
     override suspend fun search(query: String): List<SearchResponse> {
-        val doc = cfGet("$mainUrl/?s=${query.encodeUri()}").document
-
-        val results = doc.select("article.latestPost").mapNotNull { articleToResult(it) }
-        if (results.isNotEmpty()) return results
-        return doc.select("article").mapNotNull { articleToResult(it) }
+        val encoded = java.net.URLEncoder.encode(query, "UTF-8")
+        val url = "$apiUrl/posts?search=$encoded&per_page=20&_embed"
+        return fetchPosts(url)
     }
 
+    // ══════════════════════════════════════════════════════════════
+    //  LOAD
+    // ══════════════════════════════════════════════════════════════
     override suspend fun load(url: String): LoadResponse? {
-        val doc = cfGet(url).document
+        val postSlug = url.trimEnd('/').substringAfterLast('/')
 
-        val title = doc.selectFirst(
-            "h1.title.single-title.entry-title, h1.entry-title, h1.title, h1"
-        )?.text()?.trim() ?: return null
+        val apiResult = loadFromApi(postSlug, url)
+        if (apiResult != null) return apiResult
 
-        val poster = fixUrlNull(
-            doc.selectFirst("div.featured-thumbnail img")?.attr("src")
-                ?: doc.selectFirst("div.thecontent img[src*=tmdb]")?.attr("src")
-                ?: doc.selectFirst("div.thecontent img[src*=imgshare]")?.attr("src")
-                ?: doc.selectFirst("div.thecontent img[src*=imgpress]")?.attr("src")
-                ?: doc.selectFirst("img[src*=tmdb]")?.attr("src")
-        )
-
-        val plot = doc.selectFirst("div.thecontent p")?.text()?.trim()
-        val tags = doc.select("div.thecategory a").map { it.text() }
-        val year = Regex("""\b(20\d{2})\b""").find(title)?.groupValues?.get(1)?.toIntOrNull()
-
-        val isSeries = tags.any {
-            it.lowercase().contains("web series") || it.lowercase().contains("tv show")
-        } || title.lowercase().contains("season") ||
-            title.contains(Regex("""S\d{2}E\d{2}""")) ||
-            url.contains("web-series") || url.contains("tv-shows")
-
-        return if (isSeries) {
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, doc.parseEpisodes(url)) {
-                this.posterUrl = poster
-                this.plot      = plot
-                this.year      = year
-                this.tags      = tags
+        try {
+            val doc = app.get(url, headers = DEFAULT_HEADERS).document
+            if (!doc.html().contains("Just a moment")) {
+                return loadFromHtml(doc, url)
             }
-        } else {
-            newMovieLoadResponse(title, url, TvType.Movie, url) {
-                this.posterUrl = poster
-                this.plot      = plot
-                this.year      = year
-                this.tags      = tags
-            }
-        }
+        } catch (_: Exception) {}
+
+        return null
     }
 
+    // ══════════════════════════════════════════════════════════════
+    //  LOAD LINKS
+    // ══════════════════════════════════════════════════════════════
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = cfGet(data).document
+        val postSlug = data.trimEnd('/').substringAfterLast('/')
         var found = false
 
+        val contentHtml = getPostContent(postSlug)
+        if (contentHtml != null) {
+            val doc = Jsoup.parse(contentHtml)
+            found = extractLinks(doc, subtitleCallback, callback)
+        }
+
+        if (!found) {
+            try {
+                val doc = app.get(data, headers = DEFAULT_HEADERS).document
+                if (!doc.html().contains("Just a moment")) {
+                    found = extractLinks(doc, subtitleCallback, callback)
+                }
+            } catch (_: Exception) {}
+        }
+
+        return found
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  API HELPERS
+    // ══════════════════════════════════════════════════════════════
+
+    private suspend fun fetchPosts(url: String): List<SearchResponse> {
+        try {
+            val resp = app.get(url, headers = DEFAULT_HEADERS)
+            val text = resp.text
+
+            if (text.contains("Just a moment") || !text.trimStart().startsWith("[")) {
+                return emptyList()
+            }
+
+            val posts = JSONArray(text)
+            val results = mutableListOf<SearchResponse>()
+
+            for (i in 0 until posts.length()) {
+                try {
+                    val post = posts.getJSONObject(i)
+                    val result = postToSearchResponse(post) ?: continue
+                    results.add(result)
+                } catch (_: Exception) { continue }
+            }
+
+            return results
+        } catch (_: Exception) {
+            return emptyList()
+        }
+    }
+
+    private fun postToSearchResponse(post: JSONObject): SearchResponse? {
+        val title = decodeHtml(
+            post.getJSONObject("title").getString("rendered")
+        ).trim()
+        if (title.isBlank()) return null
+
+        val link = post.getString("link")
+
+        var poster: String? = null
+        try {
+            val embedded = post.getJSONObject("_embedded")
+            val media = embedded.getJSONArray("wp:featuredmedia")
+            if (media.length() > 0) {
+                poster = media.getJSONObject(0).getString("source_url")
+            }
+        } catch (_: Exception) {}
+
+        if (poster == null) {
+            try {
+                val content = post.getJSONObject("content").getString("rendered")
+                val match = Regex("""src="(https?://[^"]*(?:tmdb|bmscdn)[^"]*)"""""").find(content)
+                poster = match?.groupValues?.get(1)
+            } catch (_: Exception) {}
+        }
+
+        val isSeries = title.lowercase().contains("season") ||
+                       link.contains("web-series") ||
+                       link.contains("tv-shows")
+
+        return if (isSeries) {
+            newTvSeriesSearchResponse(title, link, TvType.TvSeries) {
+                this.posterUrl = poster
+            }
+        } else {
+            newMovieSearchResponse(title, link, TvType.Movie) {
+                this.posterUrl = poster
+            }
+        }
+    }
+
+    private suspend fun getCategoryId(slug: String): Int? {
+        catCache[slug]?.let { return it }
+
+        try {
+            val resp = app.get(
+                "$apiUrl/categories?slug=$slug",
+                headers = DEFAULT_HEADERS
+            )
+            val text = resp.text
+            if (text.contains("Just a moment") || !text.trimStart().startsWith("[")) {
+                return null
+            }
+
+            val cats = JSONArray(text)
+            if (cats.length() > 0) {
+                val id = cats.getJSONObject(0).getInt("id")
+                catCache[slug] = id
+                return id
+            }
+        } catch (_: Exception) {}
+
+        return null
+    }
+
+    private suspend fun loadFromApi(slug: String, originalUrl: String): LoadResponse? {
+        try {
+            val resp = app.get(
+                "$apiUrl/posts?slug=$slug&_embed",
+                headers = DEFAULT_HEADERS
+            )
+            val text = resp.text
+            if (text.contains("Just a moment") || !text.trimStart().startsWith("[")) {
+                return null
+            }
+
+            val posts = JSONArray(text)
+            if (posts.length() == 0) return null
+
+            val post = posts.getJSONObject(0)
+            val title = decodeHtml(post.getJSONObject("title").getString("rendered")).trim()
+            val content = post.getJSONObject("content").getString("rendered")
+
+            var poster: String? = null
+            try {
+                poster = post.getJSONObject("_embedded")
+                    .getJSONArray("wp:featuredmedia")
+                    .getJSONObject(0)
+                    .getString("source_url")
+            } catch (_: Exception) {}
+
+            val contentDoc = Jsoup.parse(content)
+            val plot = contentDoc.selectFirst("span#summary")?.text()
+                ?.replace("Summary:", "")?.trim()
+                ?: contentDoc.select("p").find { p ->
+                    p.text().contains("Plot:", ignoreCase = true)
+                }?.text()?.substringAfter("Plot:")?.trim()
+
+            val tags = mutableListOf<String>()
+            try {
+                val terms = post.getJSONObject("_embedded").getJSONArray("wp:term")
+                for (i in 0 until terms.length()) {
+                    val termGroup = terms.getJSONArray(i)
+                    for (j in 0 until termGroup.length()) {
+                        tags.add(termGroup.getJSONObject(j).getString("name"))
+                    }
+                }
+            } catch (_: Exception) {}
+
+            val year = Regex("""\((\d{4})\)""").find(title)
+                ?.groupValues?.get(1)?.toIntOrNull()
+
+            val isSeries = tags.any { tag ->
+                tag.lowercase().let {
+                    it.contains("web series") || it.contains("tv show")
+                }
+            } || title.lowercase().contains("season") ||
+              originalUrl.contains("web-series") ||
+              originalUrl.contains("tv-shows")
+
+            return if (isSeries) {
+                newTvSeriesLoadResponse(
+                    title, originalUrl, TvType.TvSeries,
+                    listOf(newEpisode(originalUrl) {
+                        this.name = "Watch / Download"
+                        this.episode = 1
+                        this.season = 1
+                    })
+                ) {
+                    this.posterUrl = poster
+                    this.plot = plot
+                    this.year = year
+                    this.tags = tags
+                }
+            } else {
+                newMovieLoadResponse(title, originalUrl, TvType.Movie, originalUrl) {
+                    this.posterUrl = poster
+                    this.plot = plot
+                    this.year = year
+                    this.tags = tags
+                }
+            }
+        } catch (_: Exception) {
+            return null
+        }
+    }
+
+    private suspend fun getPostContent(slug: String): String? {
+        try {
+            val resp = app.get(
+                "$apiUrl/posts?slug=$slug",
+                headers = DEFAULT_HEADERS
+            )
+            val text = resp.text
+            if (text.contains("Just a moment") || !text.trimStart().startsWith("[")) {
+                return null
+            }
+            val posts = JSONArray(text)
+            if (posts.length() == 0) return null
+            return posts.getJSONObject(0)
+                .getJSONObject("content")
+                .getString("rendered")
+        } catch (_: Exception) {
+            return null
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  HTML FALLBACK
+    // ══════════════════════════════════════════════════════════════
+
+    private suspend fun loadFromHtml(doc: Document, url: String): LoadResponse? {
+        val title = doc.selectFirst("h1.title.single-title.entry-title")?.text()?.trim()
+            ?: doc.selectFirst("h1")?.text()?.trim()
+            ?: return null
+
+        val poster = doc.selectFirst("div.featured-thumbnail img")?.attr("src")
+            ?: doc.selectFirst("img[src*=tmdb]")?.attr("src")
+
+        val plot = doc.selectFirst("div.thecontent p")?.text()?.trim()
+        val tags = doc.select("div.thecategory a").map { it.text() }
+        val year = Regex("""\((\d{4})\)""").find(title)
+            ?.groupValues?.get(1)?.toIntOrNull()
+
+        val isSeries = title.lowercase().contains("season") ||
+                       url.contains("web-series") || url.contains("tv-shows")
+
+        return if (isSeries) {
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries,
+                listOf(newEpisode(url) {
+                    this.name = "Watch / Download"
+                    this.episode = 1
+                    this.season = 1
+                })
+            ) {
+                this.posterUrl = poster
+                this.plot = plot
+                this.year = year
+                this.tags = tags
+            }
+        } else {
+            newMovieLoadResponse(title, url, TvType.Movie, url) {
+                this.posterUrl = poster
+                this.plot = plot
+                this.year = year
+                this.tags = tags
+            }
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  LINK EXTRACTION
+    // ══════════════════════════════════════════════════════════════
+
+    private suspend fun extractLinks(
+        doc: Document,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        var found = false
+
+        // 1 — iframes
         doc.select("iframe[src]").forEach { iframe ->
             val src = iframe.attr("src").trim()
             if (src.isNotBlank()) {
-                runCatching {
-                    loadExtractor(fixUrl(src), mainUrl, subtitleCallback, callback)
+                try {
+                    loadExtractor(src, mainUrl, subtitleCallback, callback)
                     found = true
-                }
+                } catch (_: Exception) {}
             }
         }
 
-        doc.select("a.maxbutton[href], a[href*=oxxfile]").forEach { btn ->
+        // 2 — Download buttons
+        doc.select("a[class*=maxbutton][href], a[href*=oxxf]").forEach { btn ->
             val href = btn.attr("href").trim()
             if (href.isBlank()) return@forEach
 
@@ -146,135 +431,101 @@ class CineVoodProvider : MainAPI() {
                 ?: btn.text().trim()
             val quality = getQuality(qualityText)
 
-            runCatching {
+            try {
                 val resolved = resolveOxxFile(href)
                 if (!resolved.isNullOrBlank()) {
-                    when {
-                        resolved.containsAny("hubcloud", "streamtape", "dood", "vidara", "vidnest") ->
-                            loadExtractor(resolved, mainUrl, subtitleCallback, callback)
-                        resolved.containsAny(".mkv", ".mp4") ->
-                            callback.invoke(
-                                newExtractorLink(
-                                    source = name,
-                                    name   = "$name ${getQualityLabel(quality, qualityText)}",
-                                    url    = resolved,
-                                    type   = ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = mainUrl
-                                    this.quality = quality
-                                    this.headers = mapOf("User-Agent" to USER_AGENT)
-                                }
-                            )
-                        else -> runCatching {
-                            loadExtractor(resolved, mainUrl, subtitleCallback, callback)
-                        }
+                    if (resolved.containsAny("hubcloud", "streamtape", "dood", "vidara")) {
+                        loadExtractor(resolved, mainUrl, subtitleCallback, callback)
+                    } else {
+                        callback.invoke(
+                            newExtractorLink(
+                                source = name,
+                                name   = "$name ${getQualityLabel(quality, qualityText)}",
+                                url    = resolved,
+                                type   = ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = mainUrl
+                                this.quality = quality
+                                this.headers = mapOf("User-Agent" to USER_AGENT)
+                            }
+                        )
                     }
                     found = true
                 }
-            }
+            } catch (_: Exception) {}
         }
 
-        doc.select("a[href*=hubcloud], a[href*=streamtape], a[href*=dood], a[href*=vidnest]")
-            .forEach { el ->
-                val href = el.attr("href").trim()
-                if (href.isNotBlank()) runCatching {
+        // 3 — Direct links
+        doc.select("a[href*=hubcloud], a[href*=streamtape], a[href*=dood]").forEach { el ->
+            val href = el.attr("href").trim()
+            if (href.isNotBlank()) {
+                try {
                     loadExtractor(href, mainUrl, subtitleCallback, callback)
                     found = true
-                }
+                } catch (_: Exception) {}
             }
+        }
 
         return found
     }
 
-    private fun articleToResult(article: Element): SearchResponse? {
-        val h2Link = article.selectFirst("h2 a[href], h3 a[href], .front-view-title a[href]")
-            ?: return null
-        val title = h2Link.text().trim()
-            .ifBlank { h2Link.attr("title").trim() }
-            .ifBlank { return null }
-        val href = fixUrlNull(h2Link.attr("href")) ?: return null
-        if (href.contains("/category/") || href.contains("/tag/")) return null
-
-        val poster = fixUrlNull(
-            article.selectFirst("div.featured-thumbnail img")?.attr("src")
-                ?: article.selectFirst("img")?.attr("src")
-        )
-
-        val isSeries = title.lowercase().contains("season") ||
-                       title.contains(Regex("""S\d{2}E\d{2}""")) ||
-                       href.contains("web-series") || href.contains("tv-shows")
-
-        return if (isSeries)
-            newTvSeriesSearchResponse(title, href, TvType.TvSeries) { this.posterUrl = poster }
-        else
-            newMovieSearchResponse(title, href, TvType.Movie) { this.posterUrl = poster }
-    }
-
-    private fun Document.parseEpisodes(pageUrl: String): List<Episode> {
-        val headings = select("h2, h3, h4, strong").filter {
-            it.text().contains(Regex("""(?i)(episode|ep\.?\s*\d|e\d{2})"""))
-        }
-        if (headings.isEmpty()) return listOf(
-            newEpisode(pageUrl) {
-                this.name    = "Watch / Download"
-                this.episode = 1
-                this.season  = 1
-            }
-        )
-        return headings.mapIndexed { idx, h ->
-            val epNum = Regex("""\d+""").find(h.text())?.value?.toIntOrNull() ?: (idx + 1)
-            newEpisode(pageUrl) {
-                this.name    = h.text().trim()
-                this.episode = epNum
-                this.season  = 1
-            }
-        }
-    }
+    // ══════════════════════════════════════════════════════════════
+    //  HELPERS
+    // ══════════════════════════════════════════════════════════════
 
     private suspend fun resolveOxxFile(url: String): String? {
-        return runCatching {
-            val resp = app.get(
-                url,
-                timeout        = 60,
-                allowRedirects = true,
-                headers        = mapOf("User-Agent" to USER_AGENT, "Referer" to mainUrl)
-            )
+        return try {
+            val resp = app.get(url, allowRedirects = true,
+                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to mainUrl))
             val finalUrl = resp.url
-            if (finalUrl.containsAny(".mkv", ".mp4", "hubcloud", "streamtape")) return finalUrl
+            if (finalUrl.containsAny(".mkv", ".mp4", "hubcloud", "streamtape")) {
+                return finalUrl
+            }
             resp.document.selectFirst(
                 "a[href*=hubcloud], a[href*=streamtape], a[href*=dood], " +
-                "a[href*=vidnest], a[href*=.mkv], a[href*=.mp4], " +
-                "source[src*=.mkv], source[src*=.mp4]"
-            )?.let { el ->
-                el.attr("abs:href").ifBlank { el.attr("abs:src") }
-            } ?: finalUrl.takeIf {
-                it.containsAny("hubcloud", "streamtape", ".mkv", ".mp4", "vidnest")
+                "a[href*=.mkv], a[href*=.mp4]"
+            )?.attr("abs:href") ?: finalUrl
+        } catch (_: Exception) { null }
+    }
+
+    private fun decodeHtml(html: String): String {
+        return html
+            .replace("&#8217;", "'")
+            .replace("&#8216;", "'")
+            .replace("&#8211;", "–")
+            .replace("&#8212;", "—")
+            .replace("&#038;", "&")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#8230;", "…")
+            .replace("&#039;", "'")
+            .replace(Regex("&#(\\d+);")) { mr ->
+                val code = mr.groupValues[1].toIntOrNull()
+                if (code != null) String(Character.toChars(code)) else mr.value
             }
-        }.getOrNull()
     }
 
     private fun getQuality(text: String): Int {
         val t = text.lowercase()
         return when {
-            "2160" in t || "4k" in t -> 2160
-            "1080" in t              -> 1080
-            "720"  in t              -> 720
-            "480"  in t              -> 480
-            else                     -> -1
+            "2160" in t || "4k" in t -> Qualities.P2160.value
+            "1080" in t              -> Qualities.P1080.value
+            "720"  in t              -> Qualities.P720.value
+            "480"  in t              -> Qualities.P480.value
+            else                     -> Qualities.Unknown.value
         }
     }
 
     private fun getQualityLabel(q: Int, fallback: String) = when (q) {
-        2160 -> "4K 2160p"
-        1080 -> "1080p"
-        720  -> "720p"
-        480  -> "480p"
+        Qualities.P2160.value -> "4K"
+        Qualities.P1080.value -> "1080p"
+        Qualities.P720.value  -> "720p"
+        Qualities.P480.value  -> "480p"
         else -> fallback.take(50).ifBlank { "Download" }
     }
 
     private fun String.containsAny(vararg t: String) =
         t.any { this.contains(it, ignoreCase = true) }
-
-    private fun String.encodeUri(): String =
-        java.net.URLEncoder.encode(this, "UTF-8")
 }
