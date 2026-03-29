@@ -27,8 +27,8 @@ class CineVoodProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = "${request.data}$page"
-        val doc = app.get(url, timeout = 120, headers = mapOf("User-Agent" to USER_AGENT)).document
+        val url   = "${request.data}$page"
+        val doc   = app.get(url, timeout = 120, headers = mapOf("User-Agent" to USER_AGENT)).document
         val items = doc.parsePostList()
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
@@ -48,7 +48,8 @@ class CineVoodProvider : MainAPI() {
                         ?.text()?.trim() ?: return null
         val poster = doc.selectFirst("img[src*=tmdb], img[src*=imgpress], img[src*=imgshare]")
                         ?.attr("abs:src")
-                     ?: doc.selectFirst(".featured-thumbnail img")?.attr("abs:src")
+                     ?: doc.selectFirst(".featured-thumbnail img, .post-thumbnail img")
+                        ?.attr("abs:src")
         val plot   = doc.selectFirst("div.thecontent p")?.text()?.trim()
         val tags   = doc.select("div.thecategory a").map { it.text() }
         val year   = Regex("""\b(20\d{2})\b""").find(title)?.groupValues?.get(1)?.toIntOrNull()
@@ -62,16 +63,16 @@ class CineVoodProvider : MainAPI() {
         return if (isSeries) {
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, doc.parseEpisodes(url)) {
                 this.posterUrl = poster
-                this.plot = plot
-                this.year = year
-                this.tags = tags
+                this.plot      = plot
+                this.year      = year
+                this.tags      = tags
             }
         } else {
             newMovieLoadResponse(title, url, TvType.Movie, url) {
                 this.posterUrl = poster
-                this.plot = plot
-                this.year = year
-                this.tags = tags
+                this.plot      = plot
+                this.year      = year
+                this.tags      = tags
             }
         }
     }
@@ -83,7 +84,73 @@ class CineVoodProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = app.get(data, timeout = 120, headers = mapOf("User-Agent" to USER_AGENT)).document
-        doc.extractLinks(callback)
+
+        // 1 — vidnest.io embedded iframe — direct loadExtractor
+        doc.select("iframe[src*=vidnest]").forEach { iframe ->
+            val src = iframe.attr("abs:src").trim()
+            if (src.isNotBlank()) {
+                try { loadExtractor(src, mainUrl, subtitleCallback, callback) }
+                catch (_: Exception) {}
+            }
+        }
+
+        // 2 — All other iframes
+        doc.select("iframe[src]").forEach { iframe ->
+            val src = iframe.attr("abs:src").trim()
+            if (src.isNotBlank() && !src.contains("vidnest")) {
+                try { loadExtractor(src, mainUrl, subtitleCallback, callback) }
+                catch (_: Exception) {}
+            }
+        }
+
+        // 3 — OxxFile download links → resolve to direct stream
+        doc.select("a[href*=oxxfile]").forEach { el ->
+            val href    = el.attr("abs:href").trim()
+            val label   = el.previousElementSibling()?.text()?.trim()
+                          ?: el.parent()?.previousElementSibling()?.text()?.trim()
+                          ?: el.text().trim()
+            val quality = resolveQuality(label)
+            try {
+                val streamUrl = resolveOxxFile(href) ?: return@forEach
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name   = "$name ${qualityLabel(quality, label)}",
+                        url    = streamUrl,
+                        type   = ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = mainUrl
+                        this.quality = quality
+                        this.headers = mapOf(
+                            "User-Agent" to USER_AGENT,
+                            "Referer"    to mainUrl
+                        )
+                    }
+                )
+            } catch (_: Exception) {}
+        }
+
+        // 4 — HubCloud links
+        doc.select("a[href*=hubcloud]").forEach { el ->
+            val href = el.attr("abs:href").trim()
+            try { loadExtractor(href, mainUrl, subtitleCallback, callback) }
+            catch (_: Exception) {}
+        }
+
+        // 5 — StreamTape links
+        doc.select("a[href*=streamtape]").forEach { el ->
+            val href = el.attr("abs:href").trim()
+            try { loadExtractor(href, mainUrl, subtitleCallback, callback) }
+            catch (_: Exception) {}
+        }
+
+        // 6 — DoodStream links
+        doc.select("a[href*=dood], a[href*=doodstream]").forEach { el ->
+            val href = el.attr("abs:href").trim()
+            try { loadExtractor(href, mainUrl, subtitleCallback, callback) }
+            catch (_: Exception) {}
+        }
+
         return true
     }
 
@@ -123,59 +190,37 @@ class CineVoodProvider : MainAPI() {
         return episodes
     }
 
-    private suspend fun Document.extractLinks(callback: (ExtractorLink) -> Unit) {
-        // 1 — Embedded iframes (vidnest, streamtape etc)
-        select("iframe[src]").forEach { iframe ->
-            val src = iframe.attr("abs:src").trim()
-            if (src.isNotBlank()) {
-                try { loadExtractor(src, mainUrl, { }, callback) } catch (_: Exception) {}
-            }
-        }
-
-        // 2 — OxxFile links
-        select("a[href*=oxxfile]").forEach { el ->
-            val href    = el.attr("abs:href").trim()
-            val label   = el.previousElementSibling()?.text()?.trim() ?: el.text().trim()
-            val quality = resolveQuality(label)
-            try {
-                val finalUrl = resolveOxxFile(href) ?: return@forEach
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name   = "$name ${qualityLabel(quality, label)}",
-                        url    = finalUrl,
-                        type   = ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = mainUrl
-                        this.quality = quality
-                        this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to mainUrl)
-                    }
-                )
-            } catch (_: Exception) {}
-        }
-
-        // 3 — HubCloud / other supported extractors
-        select("a[href*=hubcloud], a[href*=streamtape], a[href*=dood]").forEach { el ->
-            val href = el.attr("abs:href").trim()
-            try { loadExtractor(href, mainUrl, { }, callback) } catch (_: Exception) {}
-        }
-    }
-
     private suspend fun resolveOxxFile(url: String): String? {
         return try {
+            // Follow all redirects
             val resp = app.get(
-                url, timeout = 60,
+                url,
+                timeout = 60,
                 allowRedirects = true,
-                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to mainUrl)
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Referer"    to mainUrl
+                )
             )
-            resp.document.selectFirst(
-                "a[href*=.mkv], a[href*=.mp4], " +
+            val doc = resp.document
+
+            // Look for direct stream links in page
+            doc.selectFirst(
+                "a[href*=.mkv], " +
+                "a[href*=.mp4], " +
                 "a[href*=drive.google.com], " +
-                "a[href*=hubcloud], a[href*=streamtape], " +
-                "source[src]"
-            )?.let {
-                it.attr("abs:href").ifBlank { it.attr("abs:src") }
-            } ?: if (resp.url.contains(".mkv") || resp.url.contains(".mp4")) resp.url else null
+                "a[href*=hubcloud], " +
+                "a[href*=streamtape], " +
+                "a[href*=vidnest], " +
+                "source[src*=.mkv], " +
+                "source[src*=.mp4]"
+            )?.let { el ->
+                el.attr("abs:href").ifBlank { el.attr("abs:src") }
+            } ?: run {
+                // If final URL is a video file
+                if (resp.url.contains(".mkv") || resp.url.contains(".mp4")) resp.url
+                else null
+            }
         } catch (_: Exception) { null }
     }
 
