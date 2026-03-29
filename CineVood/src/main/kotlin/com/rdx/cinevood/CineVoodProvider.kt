@@ -16,23 +16,28 @@ class CineVoodProvider : MainAPI() {
     override val hasChromecastSupport = true
 
     companion object {
-        private const val USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/126.0.0.0 Safari/537.36"
-
-        private val API_HEADERS = mapOf(
-            "User-Agent" to USER_AGENT,
-            "Accept"     to "application/json"
+        // Mimic a real Chrome browser exactly
+        private val HEADERS = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36",
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language" to "en-US,en;q=0.9",
+            "Accept-Encoding" to "gzip, deflate, br",
+            "Connection" to "keep-alive",
+            "Upgrade-Insecure-Requests" to "1",
+            "Sec-Fetch-Dest" to "document",
+            "Sec-Fetch-Mode" to "navigate",
+            "Sec-Fetch-Site" to "none",
+            "Sec-Fetch-User" to "?1",
+            "Sec-CH-UA" to "\"Chromium\";v=\"126\", \"Google Chrome\";v=\"126\", \"Not-A.Brand\";v=\"8\"",
+            "Sec-CH-UA-Mobile" to "?1",
+            "Sec-CH-UA-Platform" to "\"Android\""
         )
-
-        private val catCache = mutableMapOf<String, Int>()
     }
 
-    private val apiUrl get() = "$mainUrl/wp-json/wp/v2"
+    private val apiBase get() = "$mainUrl/wp-json/wp/v2"
 
     override val mainPage = mainPageOf(
-        ""                   to "Latest",
+        "latest"             to "Latest",
         "bollywood"          to "Bollywood",
         "hollywood"          to "Hollywood",
         "tamil"              to "Tamil",
@@ -44,81 +49,66 @@ class CineVoodProvider : MainAPI() {
         "tv-shows"           to "TV Shows"
     )
 
+    // ══════════════════════════════════════════════════════════════
+    //  HOME PAGE
+    // ══════════════════════════════════════════════════════════════
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
         val slug = request.data
-        var url = "$apiUrl/posts?per_page=20&page=$page"
+        val url = buildApiUrl(slug, page)
 
-        if (slug.isNotBlank()) {
-            val catId = getCategoryId(slug)
-            if (catId != null) {
-                url += "&categories=$catId"
-            }
-        }
+        val text = apiGet(url) ?: return newHomePageResponse(request.name, emptyList())
 
-        val items = fetchPosts(url)
-        return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
+        val items = parsePostsJson(text)
+        return newHomePageResponse(request.name, items, hasNext = items.size >= 20)
     }
 
+    // ══════════════════════════════════════════════════════════════
+    //  SEARCH
+    // ══════════════════════════════════════════════════════════════
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = java.net.URLEncoder.encode(query, "UTF-8")
-        return fetchPosts("$apiUrl/posts?search=$encoded&per_page=20")
+        val text = apiGet("$apiBase/posts?search=$encoded&per_page=20") ?: return emptyList()
+        return parsePostsJson(text)
     }
 
+    // ══════════════════════════════════════════════════════════════
+    //  LOAD
+    // ══════════════════════════════════════════════════════════════
     override suspend fun load(url: String): LoadResponse? {
         val postSlug = url.trimEnd('/').substringAfterLast('/')
+        val text = apiGet("$apiBase/posts?slug=$postSlug") ?: return null
 
         try {
-            val resp = app.get(
-                "$apiUrl/posts?slug=$postSlug",
-                headers = API_HEADERS
-            )
-            val text = resp.text
-            if (!text.trimStart().startsWith("[")) return null
-
             val posts = JSONArray(text)
             if (posts.length() == 0) return null
-
             val post = posts.getJSONObject(0)
+
             val title = htmlDecode(post.getJSONObject("title").getString("rendered"))
-
-            var poster: String? = null
-            try {
-                poster = post.getJSONObject("meta").getString("fifu_image_url")
-                if (poster.isNullOrBlank()) poster = null
-            } catch (_: Exception) {}
-
             val contentHtml = post.getJSONObject("content").getString("rendered")
             val contentDoc = Jsoup.parse(contentHtml)
 
-            if (poster == null) {
-                poster = contentDoc.selectFirst("img[src*=tmdb]")?.attr("src")
-                    ?: contentDoc.selectFirst("img[src*=bmscdn]")?.attr("src")
-                    ?: contentDoc.selectFirst("img[src*=media-amazon]")?.attr("src")
-            }
+            // Poster
+            var poster = getPostPoster(post, contentDoc)
 
+            // Plot
             val plot = contentDoc.selectFirst("span#summary")?.text()
                 ?.substringAfter("Summary:")?.substringBefore("Read all")?.trim()
-                ?: contentDoc.select("p").find { p ->
-                    p.text().contains("Plot:", ignoreCase = true)
-                }?.text()?.substringAfter("Plot:")?.trim()
 
+            // Year
             val year = Regex("""\((\d{4})\)""").find(title)
                 ?.groupValues?.get(1)?.toIntOrNull()
 
+            // Tags
             val tags = mutableListOf<String>()
-            val genreMatch = Regex("""Genres:</strong>\s*([^<]+)""").find(contentHtml)
-            if (genreMatch != null) {
-                genreMatch.groupValues[1].split(",").forEach {
-                    tags.add(it.trim())
-                }
+            Regex("""Genres:</strong>\s*([^<]+)""").find(contentHtml)?.let {
+                it.groupValues[1].split(",").forEach { g -> tags.add(g.trim()) }
             }
 
             val isSeries = title.lowercase().contains("season") ||
-                           url.contains("web-series") ||
-                           url.contains("tv-shows")
+                           url.contains("web-series") || url.contains("tv-shows")
 
             return if (isSeries) {
                 newTvSeriesLoadResponse(title, url, TvType.TvSeries,
@@ -146,6 +136,9 @@ class CineVoodProvider : MainAPI() {
         }
     }
 
+    // ══════════════════════════════════════════════════════════════
+    //  LOAD LINKS
+    // ══════════════════════════════════════════════════════════════
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -153,25 +146,19 @@ class CineVoodProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val postSlug = data.trimEnd('/').substringAfterLast('/')
-        var found = false
+        val text = apiGet("$apiBase/posts?slug=$postSlug") ?: return false
 
         try {
-            val resp = app.get(
-                "$apiUrl/posts?slug=$postSlug",
-                headers = API_HEADERS
-            )
-            val text = resp.text
-            if (!text.trimStart().startsWith("[")) return false
-
             val posts = JSONArray(text)
             if (posts.length() == 0) return false
 
             val contentHtml = posts.getJSONObject(0)
-                .getJSONObject("content")
-                .getString("rendered")
-
+                .getJSONObject("content").getString("rendered")
             val doc = Jsoup.parse(contentHtml)
 
+            var found = false
+
+            // Iframes (vidara.to player)
             doc.select("iframe[src]").forEach { iframe ->
                 val src = iframe.attr("src").trim()
                 if (src.isNotBlank()) {
@@ -182,17 +169,18 @@ class CineVoodProvider : MainAPI() {
                 }
             }
 
+            // Download buttons
             doc.select("a[class*=maxbutton][href], a[href*=oxxf]").forEach { btn ->
                 val href = btn.attr("href").trim()
                 if (href.isBlank()) return@forEach
 
                 val qualityText = btn.previousElementSibling()?.text()?.trim()
                     ?: btn.parent()?.previousElementSibling()?.text()?.trim()
-                    ?: btn.text().trim()
+                    ?: ""
                 val quality = getQuality(qualityText)
 
                 try {
-                    val resolved = resolveOxxFile(href)
+                    val resolved = resolveLink(href)
                     if (!resolved.isNullOrBlank()) {
                         if (resolved.containsAny("hubcloud", "streamtape", "dood", "vidara")) {
                             loadExtractor(resolved, mainUrl, subtitleCallback, callback)
@@ -200,13 +188,13 @@ class CineVoodProvider : MainAPI() {
                             callback.invoke(
                                 newExtractorLink(
                                     source = name,
-                                    name   = "$name ${getQualityLabel(quality, qualityText)}",
-                                    url    = resolved,
-                                    type   = ExtractorLinkType.VIDEO
+                                    name = "$name ${qualityLabel(quality, qualityText)}",
+                                    url = resolved,
+                                    type = ExtractorLinkType.VIDEO
                                 ) {
                                     this.referer = mainUrl
                                     this.quality = quality
-                                    this.headers = mapOf("User-Agent" to USER_AGENT)
+                                    this.headers = HEADERS
                                 }
                             )
                         }
@@ -215,97 +203,146 @@ class CineVoodProvider : MainAPI() {
                 } catch (_: Exception) {}
             }
 
-            doc.select("a[href*=hubcloud], a[href*=streamtape], a[href*=dood]").forEach { el ->
-                val href = el.attr("href").trim()
-                if (href.isNotBlank()) {
-                    try {
-                        loadExtractor(href, mainUrl, subtitleCallback, callback)
-                        found = true
-                    } catch (_: Exception) {}
-                }
+            // Direct links
+            doc.select("a[href*=hubcloud], a[href*=streamtape], a[href*=dood]").forEach {
+                try {
+                    loadExtractor(it.attr("href").trim(), mainUrl, subtitleCallback, callback)
+                    found = true
+                } catch (_: Exception) {}
             }
 
-        } catch (_: Exception) {}
-
-        return found
+            return found
+        } catch (_: Exception) {
+            return false
+        }
     }
 
-    private suspend fun fetchPosts(url: String): List<SearchResponse> {
+    // ══════════════════════════════════════════════════════════════
+    //  API REQUEST — tries multiple approaches
+    // ══════════════════════════════════════════════════════════════
+    private suspend fun apiGet(url: String): String? {
+        // Attempt 1: JSON accept header
         try {
-            val resp = app.get(url, headers = API_HEADERS)
+            val resp = app.get(url, headers = mapOf(
+                "User-Agent" to HEADERS["User-Agent"]!!,
+                "Accept" to "application/json"
+            ))
             val text = resp.text
+            if (text.trimStart().startsWith("[") || text.trimStart().startsWith("{")) {
+                return text
+            }
+        } catch (_: Exception) {}
 
-            if (!text.trimStart().startsWith("[")) return emptyList()
+        // Attempt 2: Browser-like headers
+        try {
+            val resp = app.get(url, headers = HEADERS)
+            val text = resp.text
+            if (text.trimStart().startsWith("[") || text.trimStart().startsWith("{")) {
+                return text
+            }
+        } catch (_: Exception) {}
 
+        // Attempt 3: Minimal headers
+        try {
+            val resp = app.get(url, headers = mapOf(
+                "User-Agent" to "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+            ))
+            val text = resp.text
+            if (text.trimStart().startsWith("[") || text.trimStart().startsWith("{")) {
+                return text
+            }
+        } catch (_: Exception) {}
+
+        // Attempt 4: Pretend to be curl
+        try {
+            val resp = app.get(url, headers = mapOf(
+                "User-Agent" to "curl/8.0",
+                "Accept" to "*/*"
+            ))
+            val text = resp.text
+            if (text.trimStart().startsWith("[") || text.trimStart().startsWith("{")) {
+                return text
+            }
+        } catch (_: Exception) {}
+
+        return null
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  BUILD API URL
+    // ══════════════════════════════════════════════════════════════
+    private suspend fun buildApiUrl(slug: String, page: Int): String {
+        var url = "$apiBase/posts?per_page=20&page=$page"
+        if (slug.isNotBlank() && slug != "latest") {
+            val catId = getCategoryId(slug)
+            if (catId != null) url += "&categories=$catId"
+        }
+        return url
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  PARSE JSON POSTS
+    // ══════════════════════════════════════════════════════════════
+    private fun parsePostsJson(text: String): List<SearchResponse> {
+        try {
             val posts = JSONArray(text)
             val results = mutableListOf<SearchResponse>()
-
             for (i in 0 until posts.length()) {
                 try {
                     val post = posts.getJSONObject(i)
-                    val result = postToSearchResponse(post) ?: continue
-                    results.add(result)
+                    val title = htmlDecode(post.getJSONObject("title").getString("rendered")).trim()
+                    if (title.isBlank()) continue
+
+                    val link = post.getString("link")
+
+                    // Poster
+                    var poster: String? = null
+                    try {
+                        val fifu = post.getJSONObject("meta").getString("fifu_image_url")
+                        if (fifu.isNotBlank()) poster = fifu
+                    } catch (_: Exception) {}
+
+                    if (poster == null) {
+                        try {
+                            val content = post.getJSONObject("content").getString("rendered")
+                            poster = Regex("""src=["'](https?://image\.tmdb\.org[^"']+)["']""")
+                                .find(content)?.groupValues?.get(1)
+                            if (poster == null) {
+                                poster = Regex("""src=["'](https?://[^"']*(?:bmscdn|media-amazon)[^"']+\.(?:jpg|png|webp)[^"']*)["']""")
+                                    .find(content)?.groupValues?.get(1)
+                            }
+                        } catch (_: Exception) {}
+                    }
+
+                    val isSeries = title.lowercase().contains("season") ||
+                                   link.contains("web-series") || link.contains("tv-shows")
+
+                    results.add(
+                        if (isSeries) {
+                            newTvSeriesSearchResponse(title, link, TvType.TvSeries) {
+                                this.posterUrl = poster
+                            }
+                        } else {
+                            newMovieSearchResponse(title, link, TvType.Movie) {
+                                this.posterUrl = poster
+                            }
+                        }
+                    )
                 } catch (_: Exception) { continue }
             }
-
             return results
         } catch (_: Exception) {
             return emptyList()
         }
     }
 
-    private fun postToSearchResponse(post: JSONObject): SearchResponse? {
-        val title = htmlDecode(
-            post.getJSONObject("title").getString("rendered")
-        ).trim()
-        if (title.isBlank()) return null
-
-        val link = post.getString("link")
-
-        var poster: String? = null
-        try {
-            val fifuUrl = post.getJSONObject("meta").getString("fifu_image_url")
-            if (fifuUrl.isNotBlank()) poster = fifuUrl
-        } catch (_: Exception) {}
-
-        if (poster == null) {
-            try {
-                val content = post.getJSONObject("content").getString("rendered")
-                poster = Regex("""src=["'](https?://image\.tmdb\.org[^"']+)["']""")
-                    .find(content)?.groupValues?.get(1)
-                if (poster == null) {
-                    poster = Regex("""src=["'](https?://[^"']*(?:bmscdn|media-amazon)[^"']+)["']""")
-                        .find(content)?.groupValues?.get(1)
-                }
-            } catch (_: Exception) {}
-        }
-
-        val isSeries = title.lowercase().contains("season") ||
-                       link.contains("web-series") ||
-                       link.contains("tv-shows")
-
-        return if (isSeries) {
-            newTvSeriesSearchResponse(title, link, TvType.TvSeries) {
-                this.posterUrl = poster
-            }
-        } else {
-            newMovieSearchResponse(title, link, TvType.Movie) {
-                this.posterUrl = poster
-            }
-        }
-    }
-
+    // ══════════════════════════════════════════════════════════════
+    //  CATEGORY ID
+    // ══════════════════════════════════════════════════════════════
     private suspend fun getCategoryId(slug: String): Int? {
         catCache[slug]?.let { return it }
-
+        val text = apiGet("$apiBase/categories?slug=$slug&per_page=1") ?: return null
         try {
-            val resp = app.get(
-                "$apiUrl/categories?slug=$slug&per_page=1",
-                headers = API_HEADERS
-            )
-            val text = resp.text
-            if (!text.trimStart().startsWith("[")) return null
-
             val cats = JSONArray(text)
             if (cats.length() > 0) {
                 val id = cats.getJSONObject(0).getInt("id")
@@ -313,45 +350,52 @@ class CineVoodProvider : MainAPI() {
                 return id
             }
         } catch (_: Exception) {}
-
         return null
     }
 
-    private suspend fun resolveOxxFile(url: String): String? {
+    // ══════════════════════════════════════════════════════════════
+    //  HELPERS
+    // ══════════════════════════════════════════════════════════════
+    private fun getPostPoster(post: JSONObject, contentDoc: org.jsoup.nodes.Document): String? {
+        try {
+            val fifu = post.getJSONObject("meta").getString("fifu_image_url")
+            if (fifu.isNotBlank()) return fifu
+        } catch (_: Exception) {}
+
+        return contentDoc.selectFirst("img[src*=tmdb]")?.attr("src")
+            ?: contentDoc.selectFirst("img[src*=bmscdn]")?.attr("src")
+            ?: contentDoc.selectFirst("img[src*=media-amazon]")?.attr("src")
+    }
+
+    private suspend fun resolveLink(url: String): String? {
         return try {
-            val resp = app.get(url, allowRedirects = true,
-                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to mainUrl))
+            val resp = app.get(url, allowRedirects = true, headers = HEADERS)
             val finalUrl = resp.url
-            if (finalUrl.containsAny(".mkv", ".mp4", "hubcloud", "streamtape")) {
-                return finalUrl
-            }
+            if (finalUrl.containsAny(".mkv", ".mp4", "hubcloud", "streamtape")) return finalUrl
             resp.document.selectFirst(
-                "a[href*=hubcloud], a[href*=streamtape], a[href*=dood], " +
-                "a[href*=.mkv], a[href*=.mp4]"
+                "a[href*=hubcloud], a[href*=streamtape], a[href*=dood], a[href*=.mkv], a[href*=.mp4]"
             )?.attr("abs:href") ?: finalUrl
         } catch (_: Exception) { null }
     }
 
-    private fun htmlDecode(html: String): String {
-        return Jsoup.parse(html).text()
-    }
+    private fun htmlDecode(html: String) = Jsoup.parse(html).text()
 
     private fun getQuality(text: String): Int {
         val t = text.lowercase()
         return when {
             "2160" in t || "4k" in t -> Qualities.P2160.value
-            "1080" in t              -> Qualities.P1080.value
-            "720"  in t              -> Qualities.P720.value
-            "480"  in t              -> Qualities.P480.value
-            else                     -> Qualities.Unknown.value
+            "1080" in t -> Qualities.P1080.value
+            "720" in t -> Qualities.P720.value
+            "480" in t -> Qualities.P480.value
+            else -> Qualities.Unknown.value
         }
     }
 
-    private fun getQualityLabel(q: Int, fallback: String) = when (q) {
+    private fun qualityLabel(q: Int, fallback: String) = when (q) {
         Qualities.P2160.value -> "4K"
         Qualities.P1080.value -> "1080p"
-        Qualities.P720.value  -> "720p"
-        Qualities.P480.value  -> "480p"
+        Qualities.P720.value -> "720p"
+        Qualities.P480.value -> "480p"
         else -> fallback.take(50).ifBlank { "Download" }
     }
 
