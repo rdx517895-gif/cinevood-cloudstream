@@ -1,0 +1,8 @@
+{
+  "name": "RDX CineVood Repo",
+  "description": "CineVood Tamil Telugu Malayalam Bollywood Hollywood",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/rdx517895-gif/cinevood-cloudstream/builds/plugins.json"
+  ]
+}
