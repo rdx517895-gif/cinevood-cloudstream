@@ -2,102 +2,185 @@ package com.rdx.cinevood
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import org.jsoup.select.Elements
 
 class CineVoodProvider : MainAPI() {
 
-    override var mainUrl              = "https://one.1cinevood.watch"
-    override var name                 = "CineVood"
-    override val supportedTypes       = setOf(TvType.Movie, TvType.TvSeries)
-    override var lang                 = "hi"
-    override val hasMainPage          = true
+    override var mainUrl        = "https://one.1cinevood.watch"
+    override var name           = "CineVood"
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+    override var lang           = "hi"
+    override val hasMainPage    = true
     override val hasChromecastSupport = true
 
     override val mainPage = mainPageOf(
-        "$mainUrl/"                            to "Latest",
-        "$mainUrl/bollywood/"                  to "Bollywood",
-        "$mainUrl/hollywood/"                  to "Hollywood",
-        "$mainUrl/tamil/"                      to "Tamil",
-        "$mainUrl/telugu/"                     to "Telugu",
-        "$mainUrl/malayalam/"                  to "Malayalam",
-        "$mainUrl/kannada/"                    to "Kannada",
-        "$mainUrl/hindi-dubbed/south-dubbed/"  to "South Dubbed",
-        "$mainUrl/web-series/"                 to "Web Series",
-        "$mainUrl/tv-shows/"                   to "TV Shows"
+        "$mainUrl/"                                to "Latest",
+        "$mainUrl/bollywood/"                      to "Bollywood",
+        "$mainUrl/hollywood/"                      to "Hollywood",
+        "$mainUrl/tamil/"                          to "Tamil",
+        "$mainUrl/telugu/"                         to "Telugu",
+        "$mainUrl/malayalam/"                      to "Malayalam",
+        "$mainUrl/kannada/"                        to "Kannada",
+        "$mainUrl/hindi-dubbed/south-dubbed/"      to "South Dubbed",
+        "$mainUrl/web-series/"                     to "Web Series",
+        "$mainUrl/tv-shows/"                       to "TV Shows"
     )
 
-    // ── Shared headers ────────────────────────────────────────────────────
-    private val defaultHeaders = mapOf(
-        "User-Agent"      to USER_AGENT,
-        "Accept"          to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language" to "en-US,en;q=0.5"
-    )
+    companion object {
+        private const val USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Chrome/126.0.0.0 Safari/537.36"
+    }
 
-    // ══════════════════════════════════════════════════════════════════════
-    //  MAIN PAGE
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════
+    //  HOME PAGE
+    // ══════════════════════════════════════════════════════════════
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
         val url = if (page == 1) request.data
                   else "${request.data}page/$page/"
-        val doc   = app.get(url, timeout = 120, headers = defaultHeaders).document
-        val items = doc.parsePostList()
+
+        val doc = app.get(
+            url,
+            headers = mapOf("User-Agent" to USER_AGENT)
+        ).document
+
+        // ★ Select every <article class="latestPost"> on the page
+        val items = doc.select("article.latestPost").mapNotNull { article ->
+            articleToResult(article)
+        }
+
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════
     //  SEARCH
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════
     override suspend fun search(query: String): List<SearchResponse> {
         val doc = app.get(
             "$mainUrl/?s=${query.encodeUri()}",
-            timeout = 120,
-            headers = defaultHeaders
+            headers = mapOf("User-Agent" to USER_AGENT)
         ).document
-        return doc.parsePostList()
+
+        return doc.select("article.latestPost").mapNotNull { articleToResult(it) }
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    //  LOAD (movie / series detail page)
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════
+    //  ★ CORE FIX — Parse one <article> into a SearchResponse
+    // ══════════════════════════════════════════════════════════════
+    private fun articleToResult(article: Element): SearchResponse? {
+        /*
+         * HTML structure (confirmed from your site):
+         *
+         *  <article class="latestPost excerpt">
+         *    <a href="URL" title="TITLE" class="post-image post-image-left">
+         *      <div class="featured-thumbnail">
+         *        <img src="POSTER" ...>        ← poster
+         *      </div>
+         *    </a>
+         *    <header>
+         *      <h2 class="title front-view-title">
+         *        <a href="URL" title="TITLE">MOVIE NAME</a>   ← ★ title lives HERE
+         *      </h2>
+         *    </header>
+         *  </article>
+         *
+         *  BUG IN ORIGINAL CODE:
+         *    selectFirst("a[href][title]") grabs the WRAPPER <a> (which has NO text).
+         *    .text() on that <a> returns "" because it only contains a <div> with an <img>.
+         *
+         *  FIX:
+         *    Select the <a> inside <h2> instead — it has the visible movie name as text.
+         */
+
+        // ── Get title from the <h2> link (NOT the wrapper <a>) ──
+        val h2Link = article.selectFirst("h2.title a[href]")
+            ?: article.selectFirst("h2 a[href]")
+            ?: return null
+
+        val title = h2Link.text().trim()                     // visible text = movie name
+            .ifBlank { h2Link.attr("title").trim() }         // fallback to title attribute
+            .ifBlank { return null }
+
+        val href = fixUrlNull(h2Link.attr("href")) ?: return null
+
+        // ── Get poster from the <img> inside featured-thumbnail ──
+        val poster = fixUrlNull(
+            article.selectFirst("div.featured-thumbnail img")?.attr("src")
+                ?: article.selectFirst("img")?.attr("src")
+        )
+
+        // ── Detect series vs movie ──
+        val lower = title.lowercase()
+        val isSeries = lower.contains("season")
+                || href.contains("web-series")
+                || href.contains("tv-shows")
+
+        return if (isSeries) {
+            newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
+                this.posterUrl = poster
+            }
+        } else {
+            newMovieSearchResponse(title, href, TvType.Movie) {
+                this.posterUrl = poster
+            }
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  LOAD — movie/series detail page
+    // ══════════════════════════════════════════════════════════════
     override suspend fun load(url: String): LoadResponse? {
-        val doc = app.get(url, timeout = 120, headers = defaultHeaders).document
+        val doc = app.get(
+            url,
+            headers = mapOf("User-Agent" to USER_AGENT)
+        ).document
 
-        val title = doc.selectFirst(
-            "h1.entry-title, h1.title.single-title, h1.title, h1"
-        )?.text()?.trim() ?: return null
+        // ── Title: <h1 class="title single-title entry-title">...</h1> ──
+        val title = doc.selectFirst("h1.title.single-title.entry-title")?.text()?.trim()
+            ?: doc.selectFirst("h1.entry-title")?.text()?.trim()
+            ?: doc.selectFirst("h1")?.text()?.trim()
+            ?: return null
 
-        val poster = doc.selectFirst(
-            ".post-thumbnail img, .featured-thumbnail img, " +
-            "div.thecontent img, article img"
-        )?.getImgUrl()
+        // ── Poster ──
+        val poster = fixUrlNull(
+            doc.selectFirst("div.single_post div.featured-thumbnail img")?.attr("src")
+                ?: doc.selectFirst("div.featured-thumbnail img")?.attr("src")
+                ?: doc.selectFirst("div.thecontent img[src*=tmdb]")?.attr("src")
+                ?: doc.selectFirst("div.thecontent img")?.attr("src")
+        )
 
-        val plot = doc.selectFirst(
-            "div.thecontent p, .entry-content p"
-        )?.text()?.trim()
+        // ── Plot from IMDB widget ──
+        val plot = doc.selectFirst("span#summary")?.text()
+            ?.substringAfter("Summary:")?.trim()
+            ?.ifBlank { null }
+            ?: doc.select("div.thecontent p").find {
+                it.text().startsWith("Plot:", ignoreCase = true)
+            }?.text()?.substringAfter(":")?.trim()
 
-        val tags = doc.select(
-            "div.thecategory a, .post-categories a, a[rel=tag]"
-        ).map { it.text() }
+        // ── Categories: <div class="thecategory"><a>...</a></div> ──
+        val tags = doc.select("div.thecategory a").map { it.text() }
 
-        val year = Regex("""\b(20\d{2})\b""").find(title)
-                       ?.groupValues?.get(1)?.toIntOrNull()
+        // ── Year from title like "(2026)" ──
+        val year = Regex("""\((\d{4})\)""").find(title)
+            ?.groupValues?.get(1)?.toIntOrNull()
 
+        // ── Series detection ──
         val isSeries = tags.any {
-            it.lowercase().run { contains("web series") || contains("tv show") }
+            it.lowercase().let { t ->
+                t.contains("web series") || t.contains("tv show")
+            }
         } || title.lowercase().contains("season")
           || title.contains(Regex("""S\d{2}"""))
           || url.contains("web-series")
           || url.contains("tv-shows")
 
         return if (isSeries) {
-            newTvSeriesLoadResponse(
-                title, url, TvType.TvSeries, doc.parseEpisodes(url)
-            ) {
+            val episodes = doc.parseEpisodes(url)
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                 this.posterUrl = poster
                 this.plot      = plot
                 this.year      = year
@@ -113,9 +196,9 @@ class CineVoodProvider : MainAPI() {
         }
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    //  LINK EXTRACTION
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════
+    //  LOAD LINKS  —  ★ FIXED selectors for vidara.to + oxxfle ★
+    // ══════════════════════════════════════════════════════════════
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -123,245 +206,171 @@ class CineVoodProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = app.get(
-            data, timeout = 120, headers = defaultHeaders
+            data,
+            headers = mapOf("User-Agent" to USER_AGENT)
         ).document
 
         var found = false
 
-        // iframes
+        // ── 1. ALL iframes (vidara.to, etc.) ──
+        //    Your site uses: <iframe src="https://vidara.to/e/...">
+        //    Original code only checked for "vidnest" which doesn't exist on this site
         doc.select("iframe[src]").forEach { iframe ->
-            val src = iframe.attr("abs:src").trim()
+            val src = iframe.attr("src").trim()
             if (src.isNotBlank()) {
-                try { loadExtractor(src, mainUrl, subtitleCallback, callback); found = true }
-                catch (_: Exception) {}
+                runCatching {
+                    loadExtractor(fixUrl(src), mainUrl, subtitleCallback, callback)
+                    found = true
+                }
             }
         }
 
-        // OxxFile download links
-        doc.select("a[href*=oxxfile]").forEach { el ->
-            try {
-                val streamUrl = resolveOxxFile(el.attr("abs:href").trim())
+        // ── 2. Download buttons (OxxFile) ──
+        //    Your site uses: <a class="maxbutton-8 maxbutton maxbutton-oxxfle" href="...">
+        //    Original code searched for "oxxfile" but actual domain is "oxxfle"
+        //    ★ FIX: Select by class "maxbutton" which catches ALL download buttons
+        doc.select("a.maxbutton[href]").forEach { btn ->
+            val href = btn.attr("href").trim()
+            if (href.isBlank()) return@forEach
+
+            // Quality info is in the <h6> just before the button:
+            //   <h6><span>...1080p...CineVood.mkv [3.83 GB]</span></h6>
+            //   <a class="maxbutton" href="...">
+            val qualityText = findQualityLabel(btn)
+            val quality = getQuality(qualityText)
+
+            runCatching {
+                val streamUrl = resolveOxxFile(href)
                 if (!streamUrl.isNullOrBlank()) {
-                    if (streamUrl.containsAny("hubcloud","streamtape","vidnest","dood")) {
+                    // Check if resolved URL is an extractor link
+                    if (streamUrl.containsAny("hubcloud", "streamtape", "dood", "vidara")) {
                         loadExtractor(streamUrl, mainUrl, subtitleCallback, callback)
                     } else {
-                        val label   = el.closestLabel()
-                        val quality = resolveQuality(label)
-                        callback(
+                        callback.invoke(
                             newExtractorLink(
                                 source = name,
-                                name   = "$name ${qualityLabel(quality, label)}",
+                                name   = "$name ${getQualityLabel(quality, qualityText)}",
                                 url    = streamUrl,
                                 type   = ExtractorLinkType.VIDEO
                             ) {
                                 this.referer = mainUrl
                                 this.quality = quality
-                                this.headers = defaultHeaders
+                                this.headers = mapOf("User-Agent" to USER_AGENT)
                             }
                         )
                     }
                     found = true
                 }
-            } catch (_: Exception) {}
+            }
         }
 
-        // HubCloud / StreamTape / DoodStream
+        // ── 3. Fallback: any direct extractor links in content ──
         doc.select(
             "a[href*=hubcloud], a[href*=streamtape], " +
             "a[href*=dood], a[href*=doodstream]"
         ).forEach { el ->
-            try {
-                loadExtractor(el.attr("abs:href").trim(), mainUrl, subtitleCallback, callback)
+            runCatching {
+                loadExtractor(el.attr("href").trim(), mainUrl, subtitleCallback, callback)
                 found = true
-            } catch (_: Exception) {}
+            }
         }
 
         return found
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    //  ★ FIXED — parsePostList with multi‑strategy selectors ★
-    // ══════════════════════════════════════════════════════════════════════
-    private fun Document.parsePostList(): List<SearchResponse> {
+    // ══════════════════════════════════════════════════════════════
+    //  HELPERS
+    // ══════════════════════════════════════════════════════════════
 
-        /* ---------- scope to main content area ---------- */
-        val content: Element = selectFirst(
-            "#content, main, .site-content, .content-area, " +
-            ".post-listing, .recent-movies, .gridlove-posts, " +
-            "#content_box, .blog-items, #blog"
-        ) ?: body() ?: this
+    /** Walk DOM upward/backward to find the quality label (from <h6>) */
+    private fun findQualityLabel(btn: Element): String {
+        // Try: <h6> right before the button
+        btn.previousElementSibling()?.let { prev ->
+            if (prev.tagName() == "h6") return prev.text().trim()
+        }
+        // Try: parent's previous sibling
+        btn.parent()?.previousElementSibling()?.let { prev ->
+            if (prev.tagName() == "h6") return prev.text().trim()
+        }
+        return btn.text().trim()
+    }
 
-        /* ---------- Strategy 1: <article> tags ---------- */
-        var posts: Elements = content.select("article")
-
-        /* ---------- Strategy 2: div‑based containers ---------- */
-        if (posts.isEmpty()) {
-            posts = content.select(
-                "div.post-box, div.post-item, div.blog-item, " +
-                "div.post, div.item, div.movie-box, " +
-                "div.result-item, div.flw-item, div.ml-item"
+    /** Resolve OxxFile redirect to get actual download URL */
+    private suspend fun resolveOxxFile(url: String): String? {
+        return runCatching {
+            val resp = app.get(
+                url,
+                allowRedirects = true,
+                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to mainUrl)
             )
-        }
+            val finalUrl = resp.url
 
-        /* ---------- Strategy 3: list items with link+image ---------- */
-        if (posts.isEmpty()) {
-            posts = content.select("li:has(a[href]):has(img)")
-        }
+            // If redirect landed on a video file
+            if (finalUrl.contains(".mkv") || finalUrl.contains(".mp4")) {
+                return finalUrl
+            }
 
-        /* ---------- Strategy 4: direct <a> cards with image ---------- */
-        if (posts.isEmpty()) {
-            posts = content.select("a[href]:has(img)")
-        }
-
-        return posts.mapNotNull { el ->
-            elementToSearchResponse(el)
-        }.distinctBy { it.url }
+            // Parse the landing page for links
+            val doc = resp.document
+            doc.selectFirst(
+                "a[href*=hubcloud], a[href*=streamtape], " +
+                "a[href*=dood], a[href*=vidara], " +
+                "a[href*=.mkv], a[href*=.mp4], " +
+                "a[href*=drive.google.com], " +
+                "source[src*=.mkv], source[src*=.mp4]"
+            )?.let { el ->
+                el.attr("abs:href").ifBlank { el.attr("abs:src") }
+            } ?: finalUrl.takeIf {
+                it.containsAny("hubcloud", "streamtape", ".mkv", ".mp4")
+            }
+        }.getOrNull()
     }
 
-    // ── Convert one HTML element into a SearchResponse ─────────────────
-    private fun elementToSearchResponse(el: Element): SearchResponse? {
-
-        /* ---- find the best <a> for title + href ---- */
-        val a: Element = el.selectFirst(
-            "h2 a[href], h3 a[href], h4 a[href], " +
-            ".entry-title a, .post-title a, .post-box-title a, " +
-            ".front-view-title a, .film-name a"
-        )
-        ?: el.selectFirst("a[href][title]")
-        ?: el.takeIf { it.tagName() == "a" && it.hasAttr("href") }
-        ?: el.selectFirst("a[href]")
-        ?: return null
-
-        /* ---- href ---- */
-        val href = fixUrlNull(a.attr("href")) ?: return null
-        if (href == mainUrl || href == "$mainUrl/"
-            || href.contains("/category/")
-            || href.contains("/tag/")
-            || href.contains("/author/")
-            || href.endsWith("/page/")
-            || href.contains("#")
-        ) return null
-
-        /* ---- title (text first, then attribute, then img alt) ---- */
-        val title = a.text().trim()
-            .ifBlank { a.attr("title").trim() }
-            .ifBlank { el.selectFirst("span.mname, span.title, div.title")?.text()?.trim() ?: "" }
-            .ifBlank { el.selectFirst("img")?.attr("alt")?.trim() ?: "" }
-            .ifBlank { return null }
-
-        /* ---- poster (supports lazy loading) ---- */
-        val poster = fixUrlNull(el.selectFirst("img")?.getImgUrl())
-
-        /* ---- movie vs series ---- */
-        val isSeries = title.lowercase().let { t ->
-            t.contains("season") || t.contains("web series") || t.contains("tv show")
-        } || title.contains(Regex("""S\d{2}"""))
-          || href.contains("web-series")
-          || href.contains("tv-shows")
-
-        return if (isSeries)
-            newTvSeriesSearchResponse(title, href, TvType.TvSeries) { posterUrl = poster }
-        else
-            newMovieSearchResponse(title, href, TvType.Movie) { posterUrl = poster }
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    //  EPISODES
-    // ══════════════════════════════════════════════════════════════════════
-    private fun Document.parseEpisodes(pageUrl: String): List<Episode> {
-        val episodes = mutableListOf<Episode>()
+    /** Parse episodes for series pages */
+    private fun org.jsoup.nodes.Document.parseEpisodes(pageUrl: String): List<Episode> {
         val headings = select("h2, h3, h4, strong").filter {
             it.text().contains(Regex("""(?i)(episode|ep\.?\s*\d|e\d{2})"""))
         }
         if (headings.isEmpty()) {
-            episodes.add(newEpisode(pageUrl) {
-                this.name    = "Watch / Download"
-                this.episode = 1
-                this.season  = 1
+            return listOf(newEpisode(pageUrl) {
+                this.name = "Watch / Download"
+                this.episode = 1; this.season = 1
             })
-        } else {
-            headings.forEachIndexed { idx, h ->
-                val epNum = Regex("""\d+""").find(h.text())
-                    ?.value?.toIntOrNull() ?: (idx + 1)
-                episodes.add(newEpisode(pageUrl) {
-                    this.name    = h.text().trim()
-                    this.episode = epNum
-                    this.season  = 1
-                })
+        }
+        return headings.mapIndexed { idx, h ->
+            val epNum = Regex("""\d+""").find(h.text())
+                ?.value?.toIntOrNull() ?: (idx + 1)
+            newEpisode(pageUrl) {
+                this.name = h.text().trim()
+                this.episode = epNum; this.season = 1
             }
         }
-        return episodes
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    //  HELPERS
-    // ══════════════════════════════════════════════════════════════════════
+    private fun getQuality(text: String): Int {
+        val t = text.lowercase()
+        return when {
+            "2160" in t || "4k" in t -> Qualities.P2160.value
+            "1080" in t              -> Qualities.P1080.value
+            "720"  in t              -> Qualities.P720.value
+            "480"  in t              -> Qualities.P480.value
+            "360"  in t              -> Qualities.P360.value
+            else                     -> Qualities.Unknown.value
+        }
+    }
 
-    /** Get the real image URL — handles data‑src / lazy attributes */
-    private fun Element.getImgUrl(): String? {
-        val url = attr("data-src")
-            .ifBlank { attr("data-lazy-src") }
-            .ifBlank { attr("data-original") }
-            .ifBlank { attr("src") }
-        return url.ifBlank { null }
+    private fun getQualityLabel(quality: Int, fallback: String) = when (quality) {
+        Qualities.P2160.value -> "4K 2160p"
+        Qualities.P1080.value -> "1080p"
+        Qualities.P720.value  -> "720p"
+        Qualities.P480.value  -> "480p"
+        Qualities.P360.value  -> "360p"
+        else -> fallback.take(50).ifBlank { "Download" }
     }
 
     private fun String.containsAny(vararg terms: String) =
         terms.any { this.contains(it, ignoreCase = true) }
 
-    /** Walk up siblings/parents for a quality label */
-    private fun Element.closestLabel(): String =
-        previousElementSibling()?.text()?.trim()
-            ?: parent()?.previousElementSibling()?.text()?.trim()
-            ?: text().trim()
-
-    private suspend fun resolveOxxFile(url: String): String? {
-        return try {
-            val resp = app.get(
-                url, timeout = 60, allowRedirects = true,
-                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to mainUrl)
-            )
-            val doc = resp.document
-            doc.selectFirst(
-                "a[href*=hubcloud], a[href*=streamtape], a[href*=vidnest], " +
-                "a[href*=dood], a[href*=.mkv], a[href*=.mp4], " +
-                "a[href*=drive.google.com], source[src*=.mkv], source[src*=.mp4]"
-            )?.let { el ->
-                el.attr("abs:href").ifBlank { el.attr("abs:src") }
-            } ?: resp.url.takeIf {
-                it.containsAny(".mkv", ".mp4", "hubcloud", "streamtape")
-            }
-        } catch (_: Exception) { null }
-    }
-
-    private fun resolveQuality(label: String): Int {
-        val t = label.lowercase()
-        return when {
-            t.contains("2160") || t.contains("4k") -> Qualities.P2160.value
-            t.contains("1080") -> Qualities.P1080.value
-            t.contains("720")  -> Qualities.P720.value
-            t.contains("480")  -> Qualities.P480.value
-            t.contains("360")  -> Qualities.P360.value
-            else               -> Qualities.Unknown.value
-        }
-    }
-
-    private fun qualityLabel(quality: Int, fallback: String) = when (quality) {
-        Qualities.P2160.value  -> "2160p 4K"
-        Qualities.P1080.value  -> "1080p"
-        Qualities.P720.value   -> "720p"
-        Qualities.P480.value   -> "480p"
-        Qualities.P360.value   -> "360p"
-        else -> fallback.take(30).ifBlank { "Unknown" }
-    }
-
     private fun String.encodeUri(): String =
         java.net.URLEncoder.encode(this, "UTF-8")
-
-    companion object {
-        private const val USER_AGENT =
-            "Mozilla/5.0 (Linux; Android 10; SM-G973F) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/120.0.0.0 Mobile Safari/537.36"
-    }
 }
