@@ -1,0 +1,46 @@
+name: Build CineVood Plugin
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout my repo
+        uses: actions/checkout@v4
+
+      - name: Checkout CloudStream template
+        uses: actions/checkout@v4
+        with:
+          repository: recloudstream/extensions
+          path: template
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Build Plugin
+        run: |
+          cp -r CineVood template/
+          cd template
+          chmod +x gradlew
+          ./gradlew CineVood:make --no-daemon
+
+      - name: Prepare builds
+        run: |
+          mkdir -p builds
+          find template -name "*.cs3" -exec cp {} builds/ \;
+          echo '{"name":"RDX CineVood Repo","description":"CineVood Tamil Telugu Malayalam Bollywood","manifestVersion":1,"pluginLists":["https://raw.githubusercontent.com/rdx517895-gif/cinevood-cloudstream/builds/plugins.json"]}' > builds/repo.json
+          echo '[{"url":"https://raw.githubusercontent.com/rdx517895-gif/cinevood-cloudstream/builds/CineVood.cs3","internalName":"CineVoodProvider","name":"CineVood","version":1,"authors":["rdx517895-gif"],"tvTypes":["Movie","TvSeries"],"description":"CineVood Tamil Telugu Malayalam Bollywood Hollywood","language":"en","iconUrl":"https://one.1cinevood.watch/wp-content/uploads/2020/07/cvlogo.png","status":1}]' > builds/plugins.json
+
+      - name: Deploy to builds branch
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./builds
+          publish_branch: builds
+          force_orphan: true
