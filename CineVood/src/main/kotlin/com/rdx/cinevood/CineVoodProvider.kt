@@ -5,7 +5,6 @@ import com.lagradost.cloudstream3.utils.*
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
 
 class CineVoodProvider : MainAPI() {
 
@@ -45,9 +44,6 @@ class CineVoodProvider : MainAPI() {
         "tv-shows"           to "TV Shows"
     )
 
-    // ══════════════════════════════════════════════════════════════
-    //  HOME PAGE
-    // ══════════════════════════════════════════════════════════════
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -66,17 +62,11 @@ class CineVoodProvider : MainAPI() {
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  SEARCH
-    // ══════════════════════════════════════════════════════════════
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = java.net.URLEncoder.encode(query, "UTF-8")
         return fetchPosts("$apiUrl/posts?search=$encoded&per_page=20")
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  LOAD — Movie detail page
-    // ══════════════════════════════════════════════════════════════
     override suspend fun load(url: String): LoadResponse? {
         val postSlug = url.trimEnd('/').substringAfterLast('/')
 
@@ -94,45 +84,31 @@ class CineVoodProvider : MainAPI() {
             val post = posts.getJSONObject(0)
             val title = htmlDecode(post.getJSONObject("title").getString("rendered"))
 
-            // Poster from meta.fifu_image_url
             var poster: String? = null
             try {
                 poster = post.getJSONObject("meta").getString("fifu_image_url")
                 if (poster.isNullOrBlank()) poster = null
             } catch (_: Exception) {}
 
-            // Parse content HTML
             val contentHtml = post.getJSONObject("content").getString("rendered")
             val contentDoc = Jsoup.parse(contentHtml)
 
-            // Fallback poster from content
             if (poster == null) {
                 poster = contentDoc.selectFirst("img[src*=tmdb]")?.attr("src")
                     ?: contentDoc.selectFirst("img[src*=bmscdn]")?.attr("src")
                     ?: contentDoc.selectFirst("img[src*=media-amazon]")?.attr("src")
             }
 
-            // Plot
             val plot = contentDoc.selectFirst("span#summary")?.text()
                 ?.substringAfter("Summary:")?.substringBefore("Read all")?.trim()
                 ?: contentDoc.select("p").find { p ->
                     p.text().contains("Plot:", ignoreCase = true)
                 }?.text()?.substringAfter("Plot:")?.trim()
 
-            // Year
             val year = Regex("""\((\d{4})\)""").find(title)
                 ?.groupValues?.get(1)?.toIntOrNull()
 
-            // Tags from category IDs
             val tags = mutableListOf<String>()
-            try {
-                val catIds = post.getJSONArray("categories")
-                for (i in 0 until minOf(catIds.length(), 5)) {
-                    // We'll just use category names from content
-                }
-            } catch (_: Exception) {}
-
-            // Genre from content
             val genreMatch = Regex("""Genres:</strong>\s*([^<]+)""").find(contentHtml)
             if (genreMatch != null) {
                 genreMatch.groupValues[1].split(",").forEach {
@@ -140,7 +116,6 @@ class CineVoodProvider : MainAPI() {
                 }
             }
 
-            // Series detection
             val isSeries = title.lowercase().contains("season") ||
                            url.contains("web-series") ||
                            url.contains("tv-shows")
@@ -171,9 +146,6 @@ class CineVoodProvider : MainAPI() {
         }
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  LOAD LINKS
-    // ══════════════════════════════════════════════════════════════
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -200,7 +172,6 @@ class CineVoodProvider : MainAPI() {
 
             val doc = Jsoup.parse(contentHtml)
 
-            // 1 — iframes (vidara.to player)
             doc.select("iframe[src]").forEach { iframe ->
                 val src = iframe.attr("src").trim()
                 if (src.isNotBlank()) {
@@ -211,12 +182,10 @@ class CineVoodProvider : MainAPI() {
                 }
             }
 
-            // 2 — Download buttons (maxbutton / oxxfile links)
             doc.select("a[class*=maxbutton][href], a[href*=oxxf]").forEach { btn ->
                 val href = btn.attr("href").trim()
                 if (href.isBlank()) return@forEach
 
-                // Quality from the <h6> before the button
                 val qualityText = btn.previousElementSibling()?.text()?.trim()
                     ?: btn.parent()?.previousElementSibling()?.text()?.trim()
                     ?: btn.text().trim()
@@ -246,7 +215,6 @@ class CineVoodProvider : MainAPI() {
                 } catch (_: Exception) {}
             }
 
-            // 3 — Direct extractor links
             doc.select("a[href*=hubcloud], a[href*=streamtape], a[href*=dood]").forEach { el ->
                 val href = el.attr("href").trim()
                 if (href.isNotBlank()) {
@@ -262,9 +230,6 @@ class CineVoodProvider : MainAPI() {
         return found
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  FETCH POSTS FROM API
-    // ══════════════════════════════════════════════════════════════
     private suspend fun fetchPosts(url: String): List<SearchResponse> {
         try {
             val resp = app.get(url, headers = API_HEADERS)
@@ -297,14 +262,12 @@ class CineVoodProvider : MainAPI() {
 
         val link = post.getString("link")
 
-        // Poster from meta.fifu_image_url (FIFU plugin)
         var poster: String? = null
         try {
             val fifuUrl = post.getJSONObject("meta").getString("fifu_image_url")
             if (fifuUrl.isNotBlank()) poster = fifuUrl
         } catch (_: Exception) {}
 
-        // Fallback: find poster in content HTML
         if (poster == null) {
             try {
                 val content = post.getJSONObject("content").getString("rendered")
@@ -332,9 +295,6 @@ class CineVoodProvider : MainAPI() {
         }
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  GET CATEGORY ID
-    // ══════════════════════════════════════════════════════════════
     private suspend fun getCategoryId(slug: String): Int? {
         catCache[slug]?.let { return it }
 
@@ -357,9 +317,6 @@ class CineVoodProvider : MainAPI() {
         return null
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  HELPERS
-    // ══════════════════════════════════════════════════════════════
     private suspend fun resolveOxxFile(url: String): String? {
         return try {
             val resp = app.get(url, allowRedirects = true,
