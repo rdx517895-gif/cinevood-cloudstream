@@ -1,18 +1,21 @@
 package com.rdx.cinevood
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class CineVoodProvider : MainAPI() {
 
-    override var mainUrl = "https://1cinevood.watch"
+    override var mainUrl        = "https://1cinevood.watch"
     override var name           = "CineVood"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
     override var lang           = "hi"
     override val hasMainPage    = true
     override val hasChromecastSupport = true
+
+    private val cfKiller = CloudflareKiller()
 
     companion object {
         private const val USER_AGENT =
@@ -41,40 +44,22 @@ class CineVoodProvider : MainAPI() {
         "$mainUrl/tv-shows/"                       to "TV Shows"
     )
 
-    // ★★★ DEBUG VERSION - Replace after testing ★★★
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) request.data
                   else "${request.data}page/$page/"
-        
-        val response = app.get(url, timeout = 120, headers = DEFAULT_HEADERS)
-        val doc = response.document
-        val html = response.text
-        
-        // Debug: Check what we're getting
-        val pageTitle = doc.title() ?: "NO TITLE"
-        val articleCount = doc.select("article").size
-        val hasCloudflare = html.contains("Just a moment") || 
-                            html.contains("cf-browser-verification") ||
-                            html.contains("challenge-platform")
-        
+
+        val doc = app.get(
+            url,
+            timeout = 120,
+            headers = DEFAULT_HEADERS,
+            interceptor = cfKiller
+        ).document
+
         var items = doc.select("article.latestPost").mapNotNull { articleToResult(it) }
         if (items.isEmpty()) {
             items = doc.select("article").mapNotNull { articleToResult(it) }
         }
-        
-        // If no items found, show debug info as a fake movie card
-        if (items.isEmpty()) {
-            val debugInfo = "CF=$hasCloudflare | title=$pageTitle | articles=$articleCount"
-            return newHomePageResponse(
-                request.name,
-                listOf(
-                    newMovieSearchResponse(debugInfo, mainUrl, TvType.Movie) {
-                        this.posterUrl = null
-                    }
-                )
-            )
-        }
-        
+
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
 
@@ -82,15 +67,23 @@ class CineVoodProvider : MainAPI() {
         val doc = app.get(
             "$mainUrl/?s=${query.encodeUri()}",
             timeout = 120,
-            headers = DEFAULT_HEADERS
+            headers = DEFAULT_HEADERS,
+            interceptor = cfKiller
         ).document
+
         val results = doc.select("article.latestPost").mapNotNull { articleToResult(it) }
         if (results.isNotEmpty()) return results
         return doc.select("article").mapNotNull { articleToResult(it) }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val doc = app.get(url, timeout = 120, headers = DEFAULT_HEADERS).document
+        val doc = app.get(
+            url,
+            timeout = 120,
+            headers = DEFAULT_HEADERS,
+            interceptor = cfKiller
+        ).document
+
         val title = doc.selectFirst(
             "h1.title.single-title.entry-title, h1.entry-title, h1.title, h1"
         )?.text()?.trim() ?: return null
@@ -115,11 +108,17 @@ class CineVoodProvider : MainAPI() {
 
         return if (isSeries) {
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, doc.parseEpisodes(url)) {
-                this.posterUrl = poster; this.plot = plot; this.year = year; this.tags = tags
+                this.posterUrl = poster
+                this.plot = plot
+                this.year = year
+                this.tags = tags
             }
         } else {
             newMovieLoadResponse(title, url, TvType.Movie, url) {
-                this.posterUrl = poster; this.plot = plot; this.year = year; this.tags = tags
+                this.posterUrl = poster
+                this.plot = plot
+                this.year = year
+                this.tags = tags
             }
         }
     }
@@ -130,23 +129,34 @@ class CineVoodProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = app.get(data, timeout = 120, headers = DEFAULT_HEADERS).document
+        val doc = app.get(
+            data,
+            timeout = 120,
+            headers = DEFAULT_HEADERS,
+            interceptor = cfKiller
+        ).document
+
         var found = false
 
         doc.select("iframe[src]").forEach { iframe ->
             val src = iframe.attr("src").trim()
             if (src.isNotBlank()) {
-                runCatching { loadExtractor(fixUrl(src), mainUrl, subtitleCallback, callback); found = true }
+                runCatching {
+                    loadExtractor(fixUrl(src), mainUrl, subtitleCallback, callback)
+                    found = true
+                }
             }
         }
 
         doc.select("a.maxbutton[href], a[href*=oxxfile]").forEach { btn ->
             val href = btn.attr("href").trim()
             if (href.isBlank()) return@forEach
+
             val qualityText = btn.previousElementSibling()?.text()?.trim()
                 ?: btn.parent()?.previousElementSibling()?.text()?.trim()
                 ?: btn.text().trim()
             val quality = getQuality(qualityText)
+
             runCatching {
                 val resolved = resolveOxxFile(href)
                 if (!resolved.isNullOrBlank()) {
@@ -164,7 +174,9 @@ class CineVoodProvider : MainAPI() {
                                 this.quality = quality
                                 this.headers = mapOf("User-Agent" to USER_AGENT)
                             })
-                        else -> runCatching { loadExtractor(resolved, mainUrl, subtitleCallback, callback) }
+                        else -> runCatching {
+                            loadExtractor(resolved, mainUrl, subtitleCallback, callback)
+                        }
                     }
                     found = true
                 }
@@ -175,7 +187,8 @@ class CineVoodProvider : MainAPI() {
             .forEach { el ->
                 val href = el.attr("href").trim()
                 if (href.isNotBlank()) runCatching {
-                    loadExtractor(href, mainUrl, subtitleCallback, callback); found = true
+                    loadExtractor(href, mainUrl, subtitleCallback, callback)
+                    found = true
                 }
             }
 
@@ -185,16 +198,21 @@ class CineVoodProvider : MainAPI() {
     private fun articleToResult(article: Element): SearchResponse? {
         val h2Link = article.selectFirst("h2 a[href], h3 a[href], .front-view-title a[href]")
             ?: return null
-        val title = h2Link.text().trim().ifBlank { h2Link.attr("title").trim() }.ifBlank { return null }
-        val href  = fixUrlNull(h2Link.attr("href")) ?: return null
+        val title = h2Link.text().trim()
+            .ifBlank { h2Link.attr("title").trim() }
+            .ifBlank { return null }
+        val href = fixUrlNull(h2Link.attr("href")) ?: return null
         if (href.contains("/category/") || href.contains("/tag/")) return null
+
         val poster = fixUrlNull(
             article.selectFirst("div.featured-thumbnail img")?.attr("src")
                 ?: article.selectFirst("img")?.attr("src")
         )
+
         val isSeries = title.lowercase().contains("season") ||
                        title.contains(Regex("""S\d{2}E\d{2}""")) ||
                        href.contains("web-series") || href.contains("tv-shows")
+
         return if (isSeries)
             newTvSeriesSearchResponse(title, href, TvType.TvSeries) { this.posterUrl = poster }
         else
@@ -205,26 +223,43 @@ class CineVoodProvider : MainAPI() {
         val headings = select("h2, h3, h4, strong").filter {
             it.text().contains(Regex("""(?i)(episode|ep\.?\s*\d|e\d{2})"""))
         }
-        if (headings.isEmpty()) return listOf(newEpisode(pageUrl) {
-            this.name = "Watch / Download"; this.episode = 1; this.season = 1
-        })
+        if (headings.isEmpty()) return listOf(
+            newEpisode(pageUrl) {
+                this.name    = "Watch / Download"
+                this.episode = 1
+                this.season  = 1
+            }
+        )
         return headings.mapIndexed { idx, h ->
             val epNum = Regex("""\d+""").find(h.text())?.value?.toIntOrNull() ?: (idx + 1)
-            newEpisode(pageUrl) { this.name = h.text().trim(); this.episode = epNum; this.season = 1 }
+            newEpisode(pageUrl) {
+                this.name    = h.text().trim()
+                this.episode = epNum
+                this.season  = 1
+            }
         }
     }
 
     private suspend fun resolveOxxFile(url: String): String? {
         return runCatching {
-            val resp = app.get(url, timeout = 60, allowRedirects = true,
-                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to mainUrl))
+            val resp = app.get(
+                url,
+                timeout = 60,
+                allowRedirects = true,
+                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to mainUrl),
+                interceptor = cfKiller
+            )
             val finalUrl = resp.url
             if (finalUrl.containsAny(".mkv", ".mp4", "hubcloud", "streamtape")) return finalUrl
             resp.document.selectFirst(
                 "a[href*=hubcloud], a[href*=streamtape], a[href*=dood], " +
-                "a[href*=vidnest], a[href*=.mkv], a[href*=.mp4], source[src*=.mkv], source[src*=.mp4]"
-            )?.let { el -> el.attr("abs:href").ifBlank { el.attr("abs:src") } }
-                ?: finalUrl.takeIf { it.containsAny("hubcloud", "streamtape", ".mkv", ".mp4", "vidnest") }
+                "a[href*=vidnest], a[href*=.mkv], a[href*=.mp4], " +
+                "source[src*=.mkv], source[src*=.mp4]"
+            )?.let { el ->
+                el.attr("abs:href").ifBlank { el.attr("abs:src") }
+            } ?: finalUrl.takeIf {
+                it.containsAny("hubcloud", "streamtape", ".mkv", ".mp4", "vidnest")
+            }
         }.getOrNull()
     }
 
@@ -240,10 +275,16 @@ class CineVoodProvider : MainAPI() {
     }
 
     private fun getQualityLabel(q: Int, fallback: String) = when (q) {
-        2160 -> "4K 2160p"; 1080 -> "1080p"; 720 -> "720p"; 480 -> "480p"
+        2160 -> "4K 2160p"
+        1080 -> "1080p"
+        720  -> "720p"
+        480  -> "480p"
         else -> fallback.take(50).ifBlank { "Download" }
     }
 
-    private fun String.containsAny(vararg t: String) = t.any { this.contains(it, ignoreCase = true) }
-    private fun String.encodeUri(): String = java.net.URLEncoder.encode(this, "UTF-8")
+    private fun String.containsAny(vararg t: String) =
+        t.any { this.contains(it, ignoreCase = true) }
+
+    private fun String.encodeUri(): String =
+        java.net.URLEncoder.encode(this, "UTF-8")
 }
