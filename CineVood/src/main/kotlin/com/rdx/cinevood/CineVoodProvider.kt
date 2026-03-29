@@ -2,8 +2,6 @@ package com.rdx.cinevood
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.CloudflareKiller
-import okhttp3.Interceptor
 import org.jsoup.nodes.Element
 
 class CineVoodProvider : MainAPI() {
@@ -14,13 +12,6 @@ class CineVoodProvider : MainAPI() {
     override var lang           = "hi"
     override val hasMainPage    = true
     override val hasChromecastSupport = true
-
-    // ★ Cloudflare bypass
-    private val cfKiller = CloudflareKiller()
-
-    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
-        return cfKiller
-    }
 
     override val mainPage = mainPageOf(
         "$mainUrl/"                                to "Latest",
@@ -40,22 +31,16 @@ class CineVoodProvider : MainAPI() {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) " +
             "Chrome/126.0.0.0 Safari/537.36"
-    }
 
-    // ── Shared request helper with CF bypass ──────────────────────
-    private suspend fun cfGet(url: String) = app.get(
-        url,
-        headers = mapOf(
+        private val defaultHeaders = mapOf(
             "User-Agent"      to USER_AGENT,
             "Accept"          to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language" to "en-US,en;q=0.5",
-            "Referer"         to mainUrl
-        ),
-        interceptor = cfKiller
-    )
+            "Accept-Language" to "en-US,en;q=0.5"
+        )
+    }
 
     // ══════════════════════════════════════════════════════════════
-    //  HOME PAGE  (with debug output)
+    //  HOME PAGE — with DEBUG to diagnose problems
     // ══════════════════════════════════════════════════════════════
     override suspend fun getMainPage(
         page: Int,
@@ -64,32 +49,56 @@ class CineVoodProvider : MainAPI() {
         val url = if (page == 1) request.data
                   else "${request.data}page/$page/"
 
-        val doc = cfGet(url).document
+        val doc = app.get(url, headers = defaultHeaders).document
 
-        val items = doc.select("article.latestPost").mapNotNull { article ->
-            articleToResult(article)
+        // ★ Try primary selector: article.latestPost
+        var items = doc.select("article.latestPost").mapNotNull { articleToResult(it) }
+
+        // ★ Fallback: if latestPost is empty, try all articles
+        if (items.isEmpty()) {
+            items = doc.select("article").mapNotNull { articleToResult(it) }
         }
 
-        // ★ DEBUG — remove this block after confirming it works
+        // ★ Fallback 2: try swiper slider items (trending section)
         if (items.isEmpty()) {
-            val debugTitle = doc.title() ?: "NO TITLE"
-            val articleCount = doc.select("article").size
-            val bodyLength = doc.body()?.text()?.length ?: 0
-            val hasCloudflare = doc.html().contains("Just a moment")
-                    || doc.html().contains("cf-browser-verification")
-                    || doc.html().contains("challenge-platform")
+            items = doc.select("div.swiper-slide div.box-in a[href][title]").mapNotNull { a ->
+                swiperToResult(a)
+            }
+        }
+
+        // ★ DEBUG — shows what's happening. REMOVE after it works!
+        if (items.isEmpty()) {
+            val pageTitle = doc.title() ?: "null"
+            val artCount = doc.select("article").size
+            val h2Count = doc.select("h2").size
+            val bodyLen = doc.body()?.text()?.length ?: 0
+            val isCF = doc.html().let {
+                it.contains("Just a moment") || it.contains("challenge-platform")
+            }
+
+            // Show first <article> HTML snippet for debugging
+            val firstArticle = doc.selectFirst("article")
+                ?.outerHtml()?.take(200) ?: "NO ARTICLE FOUND"
 
             val debugMsg = buildString {
                 append(request.name)
-                append(" [DEBUG:")
-                append(" pageTitle='$debugTitle'")
-                append(" articles=$articleCount")
-                append(" bodyLen=$bodyLength")
-                append(" cf=$hasCloudflare")
-                append("]")
+                append(" | title=$pageTitle")
+                append(" | articles=$artCount")
+                append(" | h2=$h2Count")
+                append(" | bodyLen=$bodyLen")
+                append(" | cf=$isCF")
+                append(" | snippet=$firstArticle")
             }
 
-            return newHomePageResponse(debugMsg, items)
+            // Return a fake item so you can SEE the debug info
+            val debugList = listOf(
+                newMovieSearchResponse(
+                    debugMsg.take(200),
+                    "$mainUrl/",
+                    TvType.Movie
+                )
+            )
+            return newHomePageResponse(request.name, debugList)
         }
         // ★ END DEBUG
 
@@ -100,17 +109,39 @@ class CineVoodProvider : MainAPI() {
     //  SEARCH
     // ══════════════════════════════════════════════════════════════
     override suspend fun search(query: String): List<SearchResponse> {
-        val doc = cfGet("$mainUrl/?s=${query.encodeUri()}").document
-        return doc.select("article.latestPost").mapNotNull { articleToResult(it) }
+        val doc = app.get(
+            "$mainUrl/?s=${query.encodeUri()}",
+            headers = defaultHeaders
+        ).document
+
+        val results = doc.select("article.latestPost").mapNotNull { articleToResult(it) }
+        if (results.isNotEmpty()) return results
+
+        // Fallback
+        return doc.select("article").mapNotNull { articleToResult(it) }
     }
 
     // ══════════════════════════════════════════════════════════════
-    //  ★ Parse one <article> into SearchResponse
+    //  ★ Parse <article class="latestPost"> into SearchResponse
+    //
+    //  HTML structure (from your actual site):
+    //
+    //  <article class="latestPost excerpt">
+    //    <a href="URL" title="TITLE" class="post-image post-image-left">
+    //      <div class="featured-thumbnail">
+    //        <img src="POSTER_URL" alt="..." title="...">
+    //      </div>
+    //    </a>
+    //    <header>
+    //      <h2 class="title front-view-title">
+    //        <a href="URL" title="TITLE">MOVIE NAME HERE</a>
+    //      </h2>
+    //    </header>
+    //  </article>
     // ══════════════════════════════════════════════════════════════
     private fun articleToResult(article: Element): SearchResponse? {
-        // Title: <h2 class="title front-view-title"><a href="..." title="...">TEXT</a></h2>
-        val h2Link = article.selectFirst("h2.title a[href], h2 a[href]")
-            ?: return null
+        // ── TITLE: Get from <h2> link text ──
+        val h2Link = article.selectFirst("h2 a[href]") ?: return null
 
         val title = h2Link.text().trim()
             .ifBlank { h2Link.attr("title").trim() }
@@ -118,10 +149,36 @@ class CineVoodProvider : MainAPI() {
 
         val href = fixUrlNull(h2Link.attr("href")) ?: return null
 
-        // Poster: <div class="featured-thumbnail"><img src="..."></div>
+        // Skip non-post links
+        if (href.contains("/category/") || href.contains("/tag/")) return null
+
+        // ── POSTER: Get from <img> inside featured-thumbnail ──
         val poster = fixUrlNull(
             article.selectFirst("div.featured-thumbnail img")?.attr("src")
+                ?: article.selectFirst("img")?.attr("src")
         )
+
+        // ── SERIES detection ──
+        val isSeries = title.lowercase().contains("season")
+                || href.contains("web-series")
+                || href.contains("tv-shows")
+
+        return if (isSeries) {
+            newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
+                this.posterUrl = poster
+            }
+        } else {
+            newMovieSearchResponse(title, href, TvType.Movie) {
+                this.posterUrl = poster
+            }
+        }
+    }
+
+    // ── Parse trending swiper slides ──
+    private fun swiperToResult(a: Element): SearchResponse? {
+        val title = a.attr("title").trim().ifBlank { return null }
+        val href = fixUrlNull(a.attr("href")) ?: return null
+        val poster = fixUrlNull(a.selectFirst("img")?.attr("src"))
 
         val isSeries = title.lowercase().contains("season")
                 || href.contains("web-series")
@@ -142,20 +199,25 @@ class CineVoodProvider : MainAPI() {
     //  LOAD — detail page
     // ══════════════════════════════════════════════════════════════
     override suspend fun load(url: String): LoadResponse? {
-        val doc = cfGet(url).document
+        val doc = app.get(url, headers = defaultHeaders).document
 
         val title = doc.selectFirst("h1.title.single-title.entry-title")?.text()?.trim()
+            ?: doc.selectFirst("h1.entry-title")?.text()?.trim()
             ?: doc.selectFirst("h1")?.text()?.trim()
             ?: return null
 
         val poster = fixUrlNull(
             doc.selectFirst("div.featured-thumbnail img")?.attr("src")
                 ?: doc.selectFirst("div.thecontent img[src*=tmdb]")?.attr("src")
+                ?: doc.selectFirst("div.thecontent img[src*=image.tmdb]")?.attr("src")
         )
 
-        val plot = doc.selectFirst("span#summary")?.text()
+        val plot = doc.selectFirst("span#summary")?.ownText()
             ?.substringAfter("Summary:")?.trim()
             ?.substringBefore("Read all")?.trim()
+            ?: doc.selectFirst("strong:contains(Plot:)")
+                ?.parent()?.text()
+                ?.substringAfter("Plot:")?.trim()
 
         val tags = doc.select("div.thecategory a").map { it.text() }
 
@@ -199,7 +261,7 @@ class CineVoodProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = cfGet(data).document
+        val doc = app.get(data, headers = defaultHeaders).document
         var found = false
 
         // 1 — All iframes (vidara.to player etc.)
@@ -213,9 +275,8 @@ class CineVoodProvider : MainAPI() {
             }
         }
 
-        // 2 — Download buttons (class="maxbutton")
-        //     <h6><span>...1080p...[3.83 GB]</span></h6>
-        //     <a class="maxbutton" href="https://new9.oxxfle.info/s/...">
+        // 2 — Download buttons with class "maxbutton"
+        //     Site HTML: <a class="maxbutton-8 maxbutton maxbutton-oxxfle" href="...">
         doc.select("a.maxbutton[href]").forEach { btn ->
             val href = btn.attr("href").trim()
             if (href.isBlank()) return@forEach
@@ -249,7 +310,7 @@ class CineVoodProvider : MainAPI() {
             }
         }
 
-        // 3 — Fallback: direct links
+        // 3 — Fallback: direct extractor links
         doc.select(
             "a[href*=hubcloud], a[href*=streamtape], " +
             "a[href*=dood], a[href*=doodstream]"
@@ -275,7 +336,6 @@ class CineVoodProvider : MainAPI() {
                 headers = mapOf("User-Agent" to USER_AGENT, "Referer" to mainUrl)
             )
             val finalUrl = resp.url
-
             if (finalUrl.containsAny(".mkv", ".mp4")) return finalUrl
 
             resp.document.selectFirst(
