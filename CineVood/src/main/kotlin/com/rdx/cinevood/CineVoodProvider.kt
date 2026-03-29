@@ -41,12 +41,40 @@ class CineVoodProvider : MainAPI() {
         "$mainUrl/tv-shows/"                       to "TV Shows"
     )
 
+    // ★★★ DEBUG VERSION - Replace after testing ★★★
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) request.data
                   else "${request.data}page/$page/"
-        val doc = app.get(url, timeout = 120, headers = DEFAULT_HEADERS).document
+        
+        val response = app.get(url, timeout = 120, headers = DEFAULT_HEADERS)
+        val doc = response.document
+        val html = response.text
+        
+        // Debug: Check what we're getting
+        val pageTitle = doc.title() ?: "NO TITLE"
+        val articleCount = doc.select("article").size
+        val hasCloudflare = html.contains("Just a moment") || 
+                            html.contains("cf-browser-verification") ||
+                            html.contains("challenge-platform")
+        
         var items = doc.select("article.latestPost").mapNotNull { articleToResult(it) }
-        if (items.isEmpty()) items = doc.select("article").mapNotNull { articleToResult(it) }
+        if (items.isEmpty()) {
+            items = doc.select("article").mapNotNull { articleToResult(it) }
+        }
+        
+        // If no items found, show debug info as a fake movie card
+        if (items.isEmpty()) {
+            val debugInfo = "CF=$hasCloudflare | title=$pageTitle | articles=$articleCount"
+            return newHomePageResponse(
+                request.name,
+                listOf(
+                    newMovieSearchResponse(debugInfo, mainUrl, TvType.Movie) {
+                        this.posterUrl = null
+                    }
+                )
+            )
+        }
+        
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
 
@@ -105,7 +133,6 @@ class CineVoodProvider : MainAPI() {
         val doc = app.get(data, timeout = 120, headers = DEFAULT_HEADERS).document
         var found = false
 
-        // 1 — All iframes
         doc.select("iframe[src]").forEach { iframe ->
             val src = iframe.attr("src").trim()
             if (src.isNotBlank()) {
@@ -113,7 +140,6 @@ class CineVoodProvider : MainAPI() {
             }
         }
 
-        // 2 — OxxFile / maxbutton download buttons
         doc.select("a.maxbutton[href], a[href*=oxxfile]").forEach { btn ->
             val href = btn.attr("href").trim()
             if (href.isBlank()) return@forEach
@@ -145,7 +171,6 @@ class CineVoodProvider : MainAPI() {
             }
         }
 
-        // 3 — Direct links
         doc.select("a[href*=hubcloud], a[href*=streamtape], a[href*=dood], a[href*=vidnest]")
             .forEach { el ->
                 val href = el.attr("href").trim()
