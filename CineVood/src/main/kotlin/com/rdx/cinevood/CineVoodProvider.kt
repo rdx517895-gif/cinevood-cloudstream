@@ -2,125 +2,120 @@ package com.rdx.cinevood
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.CloudflareKiller
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class CineVoodProvider : MainAPI() {
 
-    // ✅ FIXED URL (was "one.1cinevood.watch" before — wrong!)
-    override var mainUrl              = "https://one1.cinevood.watch"
+    // ✅ REAL URL confirmed from your HTML
+    override var mainUrl              = "https://one.1cinevood.watch"
     override var name                 = "CineVood"
     override val supportedTypes       = setOf(TvType.Movie, TvType.TvSeries)
     override var lang                 = "hi"
     override val hasMainPage          = true
     override val hasChromecastSupport = true
 
-    private val cfKiller = CloudflareKiller()
-
+    // ✅ FIXED: No CloudflareKiller — use headers-based bypass instead
     companion object {
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13; Pixel 7) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) " +
             "Chrome/124.0.0.0 Mobile Safari/537.36"
+
+        private val CF_HEADERS = mapOf(
+            "User-Agent"                to USER_AGENT,
+            "Accept"                    to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language"           to "en-US,en;q=0.9",
+            "Connection"                to "keep-alive",
+            "Upgrade-Insecure-Requests" to "1",
+            "Sec-Fetch-Dest"            to "document",
+            "Sec-Fetch-Mode"            to "navigate",
+            "Sec-Fetch-Site"            to "none",
+        )
     }
 
-    // ── Categories shown on home screen ──────────────────────────────────────
+    // ── Categories confirmed from real site HTML ───────────────────────────────
     override val mainPage = mainPageOf(
-        "$mainUrl/"                           to "🔥 Latest",
-        "$mainUrl/bollywood/"                 to "🎬 Bollywood",
-        "$mainUrl/hollywood/"                 to "🌍 Hollywood",
-        "$mainUrl/tamil/"                     to "🎭 Tamil",
-        "$mainUrl/telugu/"                    to "🎭 Telugu",
-        "$mainUrl/malayalam/"                 to "🎭 Malayalam",
-        "$mainUrl/kannada/"                   to "🎭 Kannada",
-        "$mainUrl/hindi-dubbed/south-dubbed/" to "🔁 South Dubbed",
-        "$mainUrl/web-series/"                to "📺 Web Series",
-        "$mainUrl/tv-shows/"                  to "📡 TV Shows",
-        "$mainUrl/netflix/"                   to "🔴 Netflix",
-        "$mainUrl/amazon-prime-video/"        to "📦 Amazon Prime",
+        "$mainUrl/"                                      to "🔥 Latest",
+        "$mainUrl/bollywood/"                            to "🎬 Bollywood",
+        "$mainUrl/hollywood/"                            to "🌍 Hollywood",
+        "$mainUrl/hindi-dubbed/hollywood-dubbed/"        to "🌍 Hollywood Dubbed",
+        "$mainUrl/hindi-dubbed/south-dubbed/"            to "🔁 South Dubbed",
+        "$mainUrl/punjabi/"                              to "🎵 Punjabi",
+        "$mainUrl/tamil/"                                to "🎭 Tamil",
+        "$mainUrl/telugu/"                               to "🎭 Telugu",
+        "$mainUrl/malayalam/"                            to "🎭 Malayalam",
+        "$mainUrl/kannada/"                              to "🎭 Kannada",
+        "$mainUrl/bengali/"                              to "🎭 Bengali",
+        "$mainUrl/marathi/"                              to "🎭 Marathi",
+        "$mainUrl/gujarati/"                             to "🎭 Gujarati",
+        "$mainUrl/tv-shows/"                             to "📡 TV Shows",
+        "$mainUrl/web-series/"                           to "📺 Web Series",
+        "$mainUrl/web-series/netflix-web-series/"        to "🔴 Netflix",
+        "$mainUrl/web-series/amazon-web-series-webshow/" to "📦 Amazon",
+        "$mainUrl/web-series/hotstar-web-series/"        to "⭐ Hotstar",
+        "$mainUrl/web-series/zee5-web-series/"           to "🎬 Zee5",
+        "$mainUrl/web-series/sony-liv-web-show/"         to "🎵 Sony LIV",
     )
 
-    // ── Cloudflare-safe GET: tries plain first, falls back to cfKiller ────────
+    // ✅ FIXED: .document resolved by using Jsoup.parse(app.get().text)
     private suspend fun safeGet(url: String): Document {
-        return try {
-            app.get(
-                url,
-                headers = mapOf(
-                    "User-Agent"                to USER_AGENT,
-                    "Accept"                    to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                    "Accept-Language"           to "en-US,en;q=0.9",
-                    "Accept-Encoding"           to "gzip, deflate, br",
-                    "Connection"                to "keep-alive",
-                    "Upgrade-Insecure-Requests" to "1",
-                    "Sec-Fetch-Dest"            to "document",
-                    "Sec-Fetch-Mode"            to "navigate",
-                    "Sec-Fetch-Site"            to "none",
-                    "Cache-Control"             to "max-age=0",
-                ),
-                timeout = 30
-            ).document
-        } catch (e: Exception) {
-            // Fallback — CloudflareKiller uses internal WebView to bypass JS challenge
-            cfKiller.get(
-                url,
-                headers = mapOf("User-Agent" to USER_AGENT)
-            ).document
-        }
+        val response = app.get(url, headers = CF_HEADERS, timeout = 30)
+        return Jsoup.parse(response.text)
     }
 
-    // ── HOME PAGE ─────────────────────────────────────────────────────────────
+    // ── HOME PAGE ──────────────────────────────────────────────────────────────
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) request.data
                   else "${request.data.trimEnd('/')}/page/$page/"
 
         val doc   = safeGet(url)
-        val items = doc.select("article").mapNotNull { it.toSearchResult() }
 
-        // ✅ FIXED: properly checks for next page instead of infinite loop
-        val hasNext = items.isNotEmpty() &&
-                      doc.selectFirst("a.next.page-numbers") != null
+        // ✅ CONFIRMED from real HTML: article.latestPost
+        // title: h2.title.front-view-title > a
+        // poster: div.featured-thumbnail > img
+        val items = doc.select("article.latestPost").mapNotNull { it.toSearchResult() }
+
+        // ✅ CONFIRMED from real HTML: <a class="next page-numbers">
+        val hasNext = doc.selectFirst("a.next.page-numbers") != null
 
         return newHomePageResponse(request.name, items, hasNext = hasNext)
     }
 
-    // ── SEARCH ────────────────────────────────────────────────────────────────
+    // ── SEARCH ─────────────────────────────────────────────────────────────────
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = java.net.URLEncoder.encode(query, "UTF-8")
         val doc     = safeGet("$mainUrl/?s=$encoded")
-        return doc.select("article").mapNotNull { it.toSearchResult() }
+        return doc.select("article.latestPost").mapNotNull { it.toSearchResult() }
     }
 
-    // ── LOAD (detail / info page) ─────────────────────────────────────────────
+    // ── LOAD DETAIL PAGE ───────────────────────────────────────────────────────
     override suspend fun load(url: String): LoadResponse? {
         val doc = safeGet(url)
 
-        val title = doc.selectFirst(
-            "h1.entry-title, h1.title, h1.single-title, h1"
-        )?.text()?.trim() ?: return null
+        // ✅ CONFIRMED from real HTML: h1.title.single-title.entry-title
+        val title = doc.selectFirst("h1.title.single-title.entry-title")
+            ?.text()?.trim() ?: return null
 
+        // ✅ Poster confirmed from real HTML
         val poster = fixUrlNull(
-            doc.selectFirst("div.featured-thumbnail img, div.post-thumbnail img")
-                ?.attr("src")
-                ?: doc.selectFirst(".wp-post-image")?.attr("src")
-                ?: doc.selectFirst("img[src*=tmdb]")?.attr("src")
-                ?: doc.selectFirst("img[src*=imgshare]")?.attr("src")
-                ?: doc.selectFirst("article img")?.attr("src")
+            doc.selectFirst("div.single_post img.wp-post-image")?.attr("src")
+                ?: doc.selectFirst(".featured-thumbnail img")?.attr("src")
+                ?: doc.selectFirst("img.wp-post-image")?.attr("src")
         )
 
-        val plot = doc.selectFirst(
-            "div.thecontent p, div.entry-content p, div.post-content p"
-        )?.text()?.trim()
+        // ✅ CONFIRMED from real HTML: div.thecategory > a
+        val tags = doc.select("div.thecategory a")
+            .map { it.text().trim() }
+            .filter { it.isNotBlank() }
+
+        val plot = doc.selectFirst("div.thecontent p")
+            ?.text()?.trim()
+            ?.takeIf { it.length > 30 }
 
         val year = Regex("""\b(20\d{2})\b""").find(title)
             ?.groupValues?.get(1)?.toIntOrNull()
-
-        val tags = doc.select(
-            "a[rel=category tag], .cat-links a, .thecategory a"
-        ).map { it.text().trim() }.filter { it.isNotBlank() }
-
-        val rating = doc.selectFirst(".imdb-rating, .rating")
-            ?.text()?.trim()?.toRatingInt()
 
         val isSeries = isTvSeries(title, url, tags)
 
@@ -132,7 +127,7 @@ class CineVoodProvider : MainAPI() {
                 this.plot      = plot
                 this.year      = year
                 this.tags      = tags
-                this.rating    = rating
+                // ✅ FIXED: removed deprecated rating/toRatingInt
             }
         } else {
             newMovieLoadResponse(title, url, TvType.Movie, url) {
@@ -140,12 +135,12 @@ class CineVoodProvider : MainAPI() {
                 this.plot      = plot
                 this.year      = year
                 this.tags      = tags
-                this.rating    = rating
+                // ✅ FIXED: removed deprecated rating/toRatingInt
             }
         }
     }
 
-    // ── LOAD LINKS (extract playable links) ───────────────────────────────────
+    // ── LOAD LINKS ─────────────────────────────────────────────────────────────
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -155,8 +150,8 @@ class CineVoodProvider : MainAPI() {
         val doc   = safeGet(data)
         var found = false
 
-        // STEP 1 — iframes (vidnest, streamtape embedded, etc.)
-        doc.select("iframe").forEach { iframe ->
+        // ── STEP 1: iframes (vidara.to confirmed from real HTML) ──────────────
+        doc.select("div.thecontent iframe").forEach { iframe ->
             val src = iframe.attr("src").trim()
                 .ifBlank { iframe.attr("data-src").trim() }
             if (src.isNotBlank() && src.startsWith("http")) {
@@ -167,108 +162,79 @@ class CineVoodProvider : MainAPI() {
             }
         }
 
-        // STEP 2 — MaxButton / OxxFile / download buttons
-        doc.select(
-            "a.maxbutton, a[href*=oxxfile], a[href*=oxi.file], " +
-            "a[href*=gdtot], a[href*=hubdrive], a[href*=drivebot], " +
-            "a[href*=hubcloud], a.btn, .dl-link a"
-        ).forEach { btn ->
-            val href = btn.attr("href").trim()
-            if (href.isBlank() || href == "#" || href == data) return@forEach
+        // ── STEP 2: OxxFile buttons (confirmed from real HTML) ────────────────
+        // class="maxbutton-8 maxbutton maxbutton-oxxfile"
+        // href="https://new10.oxxfile.info/s/XXXXX"
+        // quality label in <h6> tag immediately after each button
+        doc.select("a.maxbutton-oxxfile, a[href*=oxxfile], a[href*=oxi.file]")
+            .forEach { btn ->
+                val href = btn.attr("href").trim()
+                if (href.isBlank() || href == "#") return@forEach
 
-            val labelText = btn.text().trim()
-                .ifBlank { btn.previousElementSibling()?.text()?.trim() ?: "Download" }
-            val quality = detectQuality(labelText)
+                // ✅ Quality from h6 sibling — confirmed from real HTML
+                val qualityText = btn.nextElementSibling()
+                    ?.takeIf { it.tagName() == "h6" }
+                    ?.text() ?: btn.text()
+                val quality = detectQuality(qualityText)
 
-            runCatching {
-                when {
-                    // Known hosters — pass directly to loadExtractor
-                    href.containsAny(
-                        "streamtape", "doodstream", "dood.pm", "dood.re",
-                        "vidnest", "filelions", "streamhub", "voe.sx",
-                        "hubcloud", "upstream"
-                    ) -> {
-                        loadExtractor(href, data, subtitleCallback, callback)
-                        found = true
-                    }
-                    // Redirect/shortener links — resolve chain first
-                    href.containsAny(
-                        "oxxfile", "oxi.file", "gdtot",
-                        "hubdrive", "drivebot"
-                    ) -> {
-                        val resolved = resolveRedirectChain(href)
-                        if (!resolved.isNullOrBlank()) {
-                            when {
-                                resolved.containsAny(
-                                    "streamtape", "dood", "vidnest",
-                                    "filelions", "hubcloud"
-                                ) -> {
+                runCatching {
+                    val resolved = resolveOxxFile(href)
+                    if (!resolved.isNullOrBlank()) {
+                        when {
+                            resolved.containsAny(
+                                "streamtape", "dood", "vidnest",
+                                "filelions", "hubcloud", "vidara",
+                                "streamhub", "voe.sx", "mixdrop"
+                            ) -> {
+                                loadExtractor(resolved, data, subtitleCallback, callback)
+                                found = true
+                            }
+                            resolved.endsWith(".mkv") || resolved.endsWith(".mp4") -> {
+                                callback.invoke(
+                                    newExtractorLink(
+                                        source = name,
+                                        name   = "$name ${qualityLabel(quality)}",
+                                        url    = resolved,
+                                        type   = ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.referer = mainUrl
+                                        this.quality = quality
+                                        this.headers = mapOf("User-Agent" to USER_AGENT)
+                                    }
+                                )
+                                found = true
+                            }
+                            resolved.startsWith("http") -> {
+                                runCatching {
                                     loadExtractor(resolved, data, subtitleCallback, callback)
                                     found = true
-                                }
-                                resolved.endsWith(".mkv") || resolved.endsWith(".mp4") -> {
-                                    callback.invoke(
-                                        newExtractorLink(
-                                            source = name,
-                                            name   = "$name ${qualityLabel(quality, labelText)}",
-                                            url    = resolved,
-                                            type   = ExtractorLinkType.VIDEO
-                                        ) {
-                                            this.referer  = mainUrl
-                                            this.quality  = quality
-                                            this.headers  = mapOf("User-Agent" to USER_AGENT)
-                                        }
-                                    )
-                                    found = true
-                                }
-                                else -> {
-                                    runCatching {
-                                        loadExtractor(resolved, data, subtitleCallback, callback)
-                                        found = true
-                                    }
                                 }
                             }
                         }
                     }
-                    // Any other external link
-                    href.startsWith("http") && !href.contains(mainUrl) -> {
-                        runCatching {
-                            loadExtractor(href, data, subtitleCallback, callback)
-                            found = true
-                        }
-                    }
+                }
+            }
+
+        // ── STEP 3: krakenfiles/buzzheavier sample button ─────────────────────
+        doc.select("a.maxbutton-download").forEach { btn ->
+            val href = btn.attr("href").trim()
+            if (href.isBlank() || href == "#") return@forEach
+            if (href.containsAny("krakenfiles", "buzzheavier")) {
+                runCatching {
+                    loadExtractor(href, data, subtitleCallback, callback)
+                    found = true
                 }
             }
         }
 
-        // STEP 3 — Direct <source> / <video> tags
-        doc.select("source[src], video[src]").forEach { el ->
-            val src = el.attr("abs:src").trim()
-            if (src.isNotBlank() && (src.contains(".mp4") || src.contains(".mkv"))) {
-                callback.invoke(
-                    newExtractorLink(
-                        source = name,
-                        name   = "$name Direct",
-                        url    = src,
-                        type   = ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = mainUrl
-                        this.quality = Qualities.Unknown.value
-                        this.headers = mapOf("User-Agent" to USER_AGENT)
-                    }
-                )
-                found = true
-            }
-        }
-
-        // STEP 4 — Scan ALL page links for known hosters
+        // ── STEP 4: Scan all links for known hosters ──────────────────────────
         doc.select("a[href]").forEach { el ->
             val href = el.attr("abs:href").trim()
-            if (href.isBlank()) return@forEach
+            if (href.isBlank() || href.contains(mainUrl)) return@forEach
             if (href.containsAny(
                     "streamtape", "doodstream", "dood.pm", "dood.re",
                     "vidnest", "filelions", "streamhub", "voe.sx",
-                    "upstream.to", "mixdrop", "hubcloud"
+                    "upstream.to", "mixdrop", "hubcloud", "vidara.to"
                 )
             ) {
                 runCatching {
@@ -281,25 +247,24 @@ class CineVoodProvider : MainAPI() {
         return found
     }
 
-    // ── Convert <article> element → SearchResponse ────────────────────────────
+    // ── article.latestPost → SearchResponse ───────────────────────────────────
     private fun Element.toSearchResult(): SearchResponse? {
-        val linkEl = selectFirst(
-            "h2.entry-title a, h3.entry-title a, " +
-            "h2 a[rel=bookmark], h3 a[rel=bookmark], " +
-            ".front-view-title a, .entry-title a"
-        ) ?: return null
+        // ✅ CONFIRMED exact selectors from your real HTML
+        val titleEl = selectFirst("h2.title.front-view-title a")
+            ?: selectFirst("h2.front-view-title a")
+            ?: return null
 
-        val title = linkEl.text().trim()
-            .ifBlank { linkEl.attr("title").trim() }
+        val title = titleEl.text().trim()
+            .ifBlank { titleEl.attr("title").trim() }
             .ifBlank { return null }
 
-        val href = fixUrlNull(linkEl.attr("abs:href")) ?: return null
-
+        val href = fixUrlNull(titleEl.attr("abs:href")) ?: return null
         if (href.containsAny("/category/", "/tag/", "/page/")) return null
 
+        // ✅ CONFIRMED from real HTML: div.featured-thumbnail > img
         val poster = fixUrlNull(
-            selectFirst("img.wp-post-image, .featured-thumbnail img, img")
-                ?.let { it.attr("src").ifBlank { it.attr("data-src") } }
+            selectFirst("div.featured-thumbnail img")?.attr("src")
+                ?: selectFirst("a.post-image img")?.attr("src")
         )
 
         return if (isTvSeries(title, href, emptyList())) {
@@ -313,21 +278,17 @@ class CineVoodProvider : MainAPI() {
         }
     }
 
-    // ── Check if content is a TV Series ───────────────────────────────────────
+    // ── Is TV Series? ──────────────────────────────────────────────────────────
     private fun isTvSeries(title: String, url: String, tags: List<String>): Boolean {
-        return tags.any {
-            it.lowercase().containsAny("web series", "tv show", "series")
-        }
-            || title.contains(Regex("""(?i)season\s*\d"""))
-            || title.contains(Regex("""S\d{2}E\d{2}"""))
+        return tags.any { it.lowercase().containsAny("web series", "tv show", "series") }
+            || title.contains(Regex("""(?i)(season\s*\d|S\d{2}E\d{2}|\bS\d{2}\b)"""))
             || url.containsAny("web-series", "tv-shows", "season")
     }
 
-    // ── Parse episodes from a series page ─────────────────────────────────────
+    // ── Extract Episodes ───────────────────────────────────────────────────────
     private fun Document.extractEpisodes(pageUrl: String): List<Episode> {
-        val headings = select("h2, h3, h4, strong, b").filter { el ->
-            el.text().contains(Regex("""(?i)(episode|ep\.?\s*\d|e\d{2}|\bep\b)"""))
-        }
+        val headings = select("div.thecontent h2, div.thecontent h3, div.thecontent h4")
+            .filter { it.text().contains(Regex("""(?i)(episode|ep\.?\s*\d|E\d{2})""")) }
 
         if (headings.isEmpty()) {
             return listOf(newEpisode(pageUrl) {
@@ -337,52 +298,51 @@ class CineVoodProvider : MainAPI() {
             })
         }
 
-        return headings.mapIndexed { idx, heading ->
-            val epText = heading.text().trim()
-            val epNum  = Regex("""\d+""").find(epText)?.value?.toIntOrNull() ?: (idx + 1)
+        return headings.mapIndexed { idx, el ->
+            val text   = el.text().trim()
+            val epNum  = Regex("""\d+""").find(text)?.value?.toIntOrNull() ?: (idx + 1)
             val season = Regex("""(?i)season\s*(\d+)""")
-                .find(epText)?.groupValues?.get(1)?.toIntOrNull() ?: 1
-
+                .find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 1
             newEpisode(pageUrl) {
-                name    = epText
-                episode = epNum
+                name        = text
+                episode     = epNum
                 this.season = season
             }
         }
     }
 
-    // ── Resolve OxxFile / redirect chain ──────────────────────────────────────
-    private suspend fun resolveRedirectChain(url: String): String? {
+    // ── OxxFile Resolver ───────────────────────────────────────────────────────
+    private suspend fun resolveOxxFile(url: String): String? {
         return runCatching {
             val response = app.get(
                 url,
                 allowRedirects = true,
-                timeout = 20,
-                headers = mapOf(
+                timeout        = 20,
+                headers        = mapOf(
                     "User-Agent" to USER_AGENT,
                     "Referer"    to mainUrl
                 )
             )
             val finalUrl = response.url
+            if (finalUrl.containsAny(
+                    ".mkv", ".mp4", "streamtape", "dood",
+                    "vidnest", "filelions", "hubcloud", "vidara"
+                )
+            ) return@runCatching finalUrl
 
-            if (finalUrl.containsAny(".mkv", ".mp4", "streamtape",
-                    "dood", "vidnest", "filelions", "hubcloud")) {
-                return@runCatching finalUrl
-            }
-
-            response.document.selectFirst(
-                "a[href*=streamtape], a[href*=dood], a[href*=vidnest], " +
-                "a[href*=filelions], a[href*=hubcloud], " +
+            val doc = Jsoup.parse(response.text)
+            doc.selectFirst(
+                "a#download-btn, a.btn-download, " +
+                "a[href*=streamtape], a[href*=dood], " +
+                "a[href*=vidnest], a[href*=filelions], " +
+                "a[href*=hubcloud], a[href*=vidara], " +
                 "a[href*=.mkv], a[href*=.mp4], " +
-                "source[src*=.mp4], source[src*=.mkv]"
-            )?.let { el ->
-                el.attr("abs:href").ifBlank { el.attr("abs:src") }
-            } ?: finalUrl
-
+                "a[href*=buzzheavier], a[href*=krakenfiles]"
+            )?.attr("abs:href")?.ifBlank { null } ?: finalUrl
         }.getOrNull()
     }
 
-    // ── Quality helpers ────────────────────────────────────────────────────────
+    // ── Quality Helpers ────────────────────────────────────────────────────────
     private fun detectQuality(text: String): Int {
         val t = text.lowercase()
         return when {
@@ -395,16 +355,16 @@ class CineVoodProvider : MainAPI() {
         }
     }
 
-    private fun qualityLabel(q: Int, fallback: String): String = when (q) {
-        Qualities.P2160.value -> "4K 2160p"
+    private fun qualityLabel(q: Int): String = when (q) {
+        Qualities.P2160.value -> "4K"
         Qualities.P1080.value -> "1080p"
         Qualities.P720.value  -> "720p"
         Qualities.P480.value  -> "480p"
         Qualities.P360.value  -> "360p"
-        else                  -> fallback.take(40).ifBlank { "Download" }
+        else                  -> "Download"
     }
 
-    // ── Extension util ─────────────────────────────────────────────────────────
+    // ── String Util ───────────────────────────────────────────────────────────
     private fun String.containsAny(
         vararg tokens: String,
         ignoreCase: Boolean = true
