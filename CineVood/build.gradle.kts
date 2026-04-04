@@ -1,4 +1,4 @@
-version = 2
+version = 3
 
 cloudstream {
     description = "CineVood – Bollywood Hollywood Tamil Telugu Malayalam"
@@ -6,5 +6,5 @@ cloudstream {
     language     = "hi"
     status       = 1
     tvTypes      = listOf("Movie", "TvSeries")
-    iconUrl      = "https://one.1cinevood.watch/wp-content/uploads/2020/07/cvlogo.png"
+    iconUrl      = "https://one1.cinevood.watch/wp-content/uploads/2020/07/cvlogo.png"
 }
