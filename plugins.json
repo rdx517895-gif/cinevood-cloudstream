@@ -1,0 +1,12 @@
+[{
+  "url": "https://raw.githubusercontent.com/rdx517895-gif/cinevood-cloudstream/builds/CineVood.cs3",
+  "internalName": "CineVood",
+  "name": "CineVood",
+  "version": 3,
+  "authors": ["rdx517895-gif"],
+  "tvTypes": ["Movie", "TvSeries"],
+  "description": "CineVood – Bollywood Hollywood Tamil Telugu Malayalam",
+  "language": "hi",
+  "iconUrl": "https://one.1cinevood.watch/wp-content/uploads/2020/07/cvlogo.png",
+  "status": 1
+}]
