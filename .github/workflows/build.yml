@@ -8,6 +8,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+
       - name: Checkout my repo
         uses: actions/checkout@v4
 
@@ -34,8 +35,30 @@ jobs:
         run: |
           mkdir -p builds
           find template -name "*.cs3" -exec cp {} builds/ \;
-          echo '{"name":"RDX CineVood Repo","description":"CineVood Tamil Telugu Malayalam Bollywood","manifestVersion":1,"pluginLists":["https://raw.githubusercontent.com/rdx517895-gif/cinevood-cloudstream/builds/plugins.json"]}' > builds/repo.json
-          echo '[{"url":"https://raw.githubusercontent.com/rdx517895-gif/cinevood-cloudstream/builds/CineVood.cs3","internalName":"CineVoodProvider","name":"CineVood","version":1,"authors":["rdx517895-gif"],"tvTypes":["Movie","TvSeries"],"description":"CineVood Tamil Telugu Malayalam Bollywood Hollywood","language":"en","iconUrl":"https://one.1cinevood.watch/wp-content/uploads/2020/07/cvlogo.png","status":1}]' > builds/plugins.json
+
+          echo '{
+            "name": "RDX CineVood Repo",
+            "description": "CineVood Tamil Telugu Malayalam Bollywood Hollywood",
+            "manifestVersion": 1,
+            "pluginLists": [
+              "https://raw.githubusercontent.com/rdx517895-gif/cinevood-cloudstream/builds/plugins.json"
+            ]
+          }' > builds/repo.json
+
+          echo '[{
+            "url": "https://raw.githubusercontent.com/rdx517895-gif/cinevood-cloudstream/builds/CineVood.cs3",
+            "internalName": "CineVood",
+            "name": "CineVood",
+            "version": 3,
+            "authors": ["rdx517895-gif"],
+            "tvTypes": ["Movie", "TvSeries"],
+            "description": "CineVood – Bollywood Hollywood Tamil Telugu Malayalam",
+            "language": "hi",
+            "iconUrl": "https://one.1cinevood.watch/wp-content/uploads/2020/07/cvlogo.png",
+            "status": 1
+          }]' > builds/plugins.json
+
+          touch builds/.nojekyll
 
       - name: Deploy to builds branch
         uses: peaceiris/actions-gh-pages@v3
